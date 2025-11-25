@@ -21,10 +21,10 @@ from sklearn.metrics import classification_report, confusion_matrix
 # CONFIGURATION — data paths and constants
 # -------------------------------------------------------------
 # Change BASE_PATH according to your environment (HDFS or local)
-BASE_PATH = "hdfs:///data/fer2013"
+BASE_PATH = "file:///home/sat3812/Final_project/Dataset"
 TRAIN_PATH = os.path.join(BASE_PATH, "train")
 TEST_PATH  = os.path.join(BASE_PATH, "test")
-OUTPUT_DIR = "/mnt/data/fer_ready"
+OUTPUT_DIR = "/home/sat3812/Final_project/Output_p1/"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 IMG_SIZE = 48   # Standard FER image size
 
