@@ -1,75 +1,70 @@
 # ==============================================================
-# PERSON 1 — COMPLETE UPDATED PIPELINE WITH JPG/JPEG SUPPORT
-# FER2013-STYLE FACE EMOTION CLASSIFICATION
+# PERSON 1 — PySpark Preprocessing + EDA + Export + Baseline CNN
 # ==============================================================
 
 import os
-import io
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import Counter
-from PIL import Image
-
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.types import ArrayType, FloatType, IntegerType
-
+from PIL import Image
+import io
 import tensorflow as tf
 from sklearn.metrics import classification_report, confusion_matrix
 
 # -------------------------------------------------------------
-# FIXED PATHS — DIRECT GLOB PATHS (NO os.path.join)
+# CONFIGURE LOCAL DATA PATH (YOUR VM PATH)
 # -------------------------------------------------------------
-TRAIN_DIR = "file:///home/sat3812/Final_project/Dataset/train"
-TEST_DIR  = "file:///home/sat3812/Final_project/Dataset/test"
-
-# Spark needs file globs to load all file types recursively
-TRAIN_PATH = TRAIN_DIR + "/*/*"
-TEST_PATH  = TEST_DIR  + "/*/*"
-
-OUTPUT_DIR = "/home/sat3812/Final_project/Output_p1"
+BASE_PATH = "/home/sat3812/Final_project/Dataset"
+TRAIN_PATH = os.path.join(BASE_PATH, "train")
+TEST_PATH  = os.path.join(BASE_PATH, "test")
+OUTPUT_DIR = "/home/sat3812/Final_project/output_p1"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 IMG_SIZE = 48
 
 LABEL_MAP = {
-    "angry": 0, "disgust": 1, "fear": 2, "happy": 3,
-    "neutral": 4, "sad": 5, "surprise": 6
+    "angry": 0,
+    "disgust": 1,
+    "fear": 2,
+    "happy": 3,
+    "neutral": 4,
+    "sad": 5,
+    "surprise": 6
 }
 NUM_CLASSES = len(LABEL_MAP)
 
 # -------------------------------------------------------------
-# START SPARK (LOCAL MODE)
+# START SPARK (LOCAL VM ONLY)
 # -------------------------------------------------------------
 spark = (
     SparkSession.builder
-    .appName("FER-Person1-FullPipeline-LOCAL")
+    .appName("FER-Person1")
+    .master("local[*]")
     .config("spark.driver.memory", "4g")
-    .config("spark.executor.memory", "4g")
-    .config("spark.executor.cores", "2")
     .getOrCreate()
 )
-print("🔥 Spark session started in LOCAL mode")
+print("🔥 Spark Started!")
 
 # -------------------------------------------------------------
-# UDF: Convert image bytes → normalized 48×48 vector
+# IMAGE → VECTOR UDF
 # -------------------------------------------------------------
-def image_to_vector(bytestr):
+def img_to_vec(bytestr):
     try:
         img = Image.open(io.BytesIO(bytestr)).convert("L")
         img = img.resize((IMG_SIZE, IMG_SIZE))
         arr = np.asarray(img, dtype=np.float32) / 255.0
         return arr.flatten().tolist()
-    except Exception:
+    except:
         return None
 
-vec_udf = F.udf(image_to_vector, ArrayType(FloatType()))
-label_udf = F.udf(lambda s: LABEL_MAP.get(s, -1), IntegerType())
+vec_udf = F.udf(lambda b: img_to_vec(b), ArrayType(FloatType()))
 
-spark.udf.register("vec_udf", vec_udf)
-spark.udf.register("label_udf", label_udf)
+label_udf = F.udf(lambda l: LABEL_MAP.get(l, -1), IntegerType())
 
 # -------------------------------------------------------------
-# LOAD DATA (Supports JPG/JPEG/PNG and UPPERCASE)
+# LOAD IMAGES FROM LOCAL FOLDERS (Spark supports this!)
 # -------------------------------------------------------------
 def load_split(path):
     df = (
@@ -78,108 +73,96 @@ def load_split(path):
         .load(path)
     )
 
-    # Case-insensitive extension detection
     df = df.withColumn(
         "label_str",
-        F.regexp_extract(
-            F.col("image.origin"),
-            r"/([^/]+)/[^/]+\.(?i:jpg|jpeg|png)$",
-            1
-        )
+        F.regexp_extract(F.col("image.origin"), r".*/([^/]+)/[^/]+$", 1)
     )
+    df = df.withColumn("label", label_udf("label_str"))
+    return df.filter("label >= 0")
 
-    df = df.withColumn("label", label_udf(F.col("label_str")))
-    df = df.filter(F.col("label") >= 0)
-    return df
+print("📂 Loading data...")
+train_df = load_split(TRAIN_PATH)
+test_df  = load_split(TEST_PATH)
 
-print(f"📂 Loading dataset from:")
-print(TRAIN_PATH)
-print(TEST_PATH)
-
-full_train_df = load_split(TRAIN_PATH)
-test_df       = load_split(TEST_PATH)
-
-print("Train images:", full_train_df.count())
-print("Test images:",  test_df.count())
+print("Train count:", train_df.count())
+print("Test count:",  test_df.count())
 
 # -------------------------------------------------------------
-# TRAIN / VALIDATION SPLIT
+# TRAIN/VAL SPLIT
 # -------------------------------------------------------------
-train_df, val_df = full_train_df.randomSplit([0.8, 0.2], seed=42)
-print("After split → Train:", train_df.count(), "| Val:", val_df.count())
+train_df, val_df = train_df.randomSplit([0.8, 0.2], seed=42)
 
 # -------------------------------------------------------------
-# PREPROCESS (Spark DF → NumPy → NPZ)
+# PREPROCESS: Convert Spark → NumPy
 # -------------------------------------------------------------
 def preprocess(df, name):
-    print(f"⚙️ Preprocessing {name}...")
+    print(f"⚙️ Processing {name}...")
+    df2 = df.withColumn("features", vec_udf("image.data")).dropna()
 
-    df2 = df.withColumn("features", vec_udf(F.col("image.data"))).dropna()
     rows = df2.select("features", "label").collect()
-
     X = np.array([r["features"] for r in rows], dtype=np.float32)
     y = np.array([r["label"] for r in rows], dtype=np.int64)
 
-    np.savez_compressed(f"{OUTPUT_DIR}/{name}.npz", X=X, y=y)
-    print(f"✔ Saved {name}.npz | shape:", X.shape, y.shape)
+    np.savez_compressed(os.path.join(OUTPUT_DIR, f"{name}.npz"), X=X, y=y)
+    print(f"✔ Saved {name}.npz → {X.shape}")
     return X, y
 
 X_train, y_train = preprocess(train_df, "train")
-X_val,   y_val   = preprocess(val_df,   "val")
-X_test,  y_test  = preprocess(test_df,  "test")
+X_val, y_val     = preprocess(val_df, "val")
+X_test, y_test   = preprocess(test_df, "test")
+
+spark.stop()
+print("🟢 Spark stopped.")
 
 # -------------------------------------------------------------
 # EDA — CLASS DISTRIBUTION
 # -------------------------------------------------------------
-def plot_distribution(y):
+def plot_dist(y, title):
     counts = Counter(y)
-    labels = sorted(counts.keys())
-    class_names = [list(LABEL_MAP.keys())[i] for i in labels]
-    values = [counts[l] for l in labels]
+    names = list(LABEL_MAP.keys())
+    vals = [counts.get(LABEL_MAP[n], 0) for n in names]
 
-    plt.figure(figsize=(6,4))
-    plt.bar(class_names, values)
+    plt.figure(figsize=(8,4))
+    plt.bar(names, vals)
     plt.xticks(rotation=45)
+    plt.title(title)
     plt.tight_layout()
-    plt.savefig(f"{OUTPUT_DIR}/class_distribution.png")
-    plt.close()
+    plt.savefig(f"{OUTPUT_DIR}/{title}.png")
+    plt.show()
 
-plot_distribution(y_train)
+plot_dist(y_train, "Train_Class_Distribution")
 
 # -------------------------------------------------------------
 # EDA — SAMPLE IMAGES
 # -------------------------------------------------------------
 def show_samples(X, y):
     inv = {v:k for k,v in LABEL_MAP.items()}
-    plt.figure(figsize=(6,6))
     idxs = np.random.choice(len(X), 9, replace=False)
+    plt.figure(figsize=(6,6))
     for i, idx in enumerate(idxs):
-        img = X[idx].reshape(IMG_SIZE, IMG_SIZE)
         plt.subplot(3,3,i+1)
-        plt.imshow(img, cmap="gray")
-        plt.title(inv[int(y[idx])])
+        plt.imshow(X[idx].reshape(48,48), cmap="gray")
+        plt.title(inv[y[idx]])
         plt.axis("off")
     plt.tight_layout()
-    plt.savefig(f"{OUTPUT_DIR}/sample_images.png")
-    plt.close()
+    plt.show()
 
 show_samples(X_train, y_train)
 
-spark.stop()
-print("🟢 Spark preprocessing complete!")
+# -------------------------------------------------------------
+# CNN INPUT SHAPES
+# -------------------------------------------------------------
+X_train_cnn = X_train.reshape(-1, 48, 48, 1)
+X_val_cnn   = X_val.reshape(-1, 48, 48, 1)
+X_test_cnn  = X_test.reshape(-1, 48, 48, 1)
 
-# =============================================================
-# BASELINE CNN TRAINING
-# =============================================================
-X_train = X_train.reshape(-1, IMG_SIZE, IMG_SIZE, 1)
-X_val   = X_val.reshape(-1, IMG_SIZE, IMG_SIZE, 1)
-X_test  = X_test.reshape(-1, IMG_SIZE, IMG_SIZE, 1)
-
-def build_baseline():
-    return tf.keras.Sequential([
-        tf.keras.layers.Input((IMG_SIZE, IMG_SIZE, 1)),
-
-        tf.keras.layers.Conv2D(32, (3,3), activation="relu", padding="same"),
+# -------------------------------------------------------------
+# BASELINE CNN
+# -------------------------------------------------------------
+def build_cnn():
+    model = tf.keras.Sequential([
+        tf.keras.layers.Conv2D(32, (3,3), activation="relu", padding="same",
+                               input_shape=(48,48,1)),
         tf.keras.layers.MaxPooling2D(),
 
         tf.keras.layers.Conv2D(64, (3,3), activation="relu", padding="same"),
@@ -194,51 +177,33 @@ def build_baseline():
 
         tf.keras.layers.Dense(NUM_CLASSES, activation="softmax")
     ])
+    return model
 
-model = build_baseline()
+model = build_cnn()
 model.compile(
-    optimizer=tf.keras.optimizers.Adam(1e-3),
+    optimizer="adam",
     loss="sparse_categorical_crossentropy",
     metrics=["accuracy"]
 )
 
-callbacks = [
-    tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True),
-    tf.keras.callbacks.ModelCheckpoint(f"{OUTPUT_DIR}/baseline_best.h5", save_best_only=True)
-]
-
+print("🚀 Training CNN...")
 history = model.fit(
-    X_train, y_train,
-    validation_data=(X_val, y_val),
-    epochs=20,
+    X_train_cnn, y_train,
+    validation_data=(X_val_cnn, y_val),
+    epochs=15,
     batch_size=32,
-    verbose=2,
-    callbacks=callbacks
+    verbose=2
 )
 
 # -------------------------------------------------------------
-# TRAINING CURVES
+# TEST SCORE
 # -------------------------------------------------------------
-plt.plot(history.history["accuracy"], label="Train")
-plt.plot(history.history["val_accuracy"], label="Val")
-plt.legend()
-plt.savefig(f"{OUTPUT_DIR}/baseline_accuracy.png")
-plt.close()
+loss, acc = model.evaluate(X_test_cnn, y_test, verbose=0)
+print(f"\n🎯 Test Accuracy: {acc:.4f}")
 
-plt.plot(history.history["loss"], label="Train")
-plt.plot(history.history["val_loss"], label="Val")
-plt.legend()
-plt.savefig(f"{OUTPUT_DIR}/baseline_loss.png")
-plt.close()
+y_pred = model.predict(X_test_cnn).argmax(axis=1)
 
-# -------------------------------------------------------------
-# TEST EVALUATION
-# -------------------------------------------------------------
-test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
-print(f"\n🎯 Baseline CNN Test Accuracy = {test_acc:.4f}")
-
-y_pred = model.predict(X_test).argmax(axis=1)
 print("\nClassification Report:\n", classification_report(y_test, y_pred))
 print("\nConfusion Matrix:\n", confusion_matrix(y_test, y_pred))
 
-print("\n🚀 PERSON 1 COMPLETE — NPZ + baseline model ready for teammates.")
+print("\n🚀 PERSON 1 DONE — Data ready for Person 2 & 3.")
