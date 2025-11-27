@@ -1,85 +1,71 @@
-# =====================================================================
-# PERSON 2 — Transfer Learning with ResNet50 (Using Person1 NPZ files)
-# Saves all outputs to: /home/sat3812/Final_project/Output_2
-# =====================================================================
-
 import os
 import numpy as np
-import tensorflow as tf
 import matplotlib.pyplot as plt
+import tensorflow as tf
 from sklearn.metrics import classification_report, confusion_matrix
-from tensorflow.keras.applications import ResNet50
+import seaborn as sns
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
 from tensorflow.keras.models import Model
 
-# =====================================================================
-# 1. PATHS + OUTPUT FOLDER
-# =====================================================================
-npz_path = "/home/sat3812/Final_project/Dataset/npz"
+# ============================================================
+# 1. SETUP OUTPUT FOLDER
+# ============================================================
 output_dir = "/home/sat3812/Final_project/Output_2"
 os.makedirs(output_dir, exist_ok=True)
-
-print("Using NPZ files from:", npz_path)
 print("Saving all Person2 outputs to:", output_dir)
 
-# =====================================================================
-# 2. LOAD DATA FROM PERSON 1
-# =====================================================================
-train = np.load(os.path.join(npz_path, "train.npz"))
-val   = np.load(os.path.join(npz_path, "val.npz"))
-test  = np.load(os.path.join(npz_path, "test.npz"))
+# ============================================================
+# 2. LOAD NPZ FILES (already created by Person1)
+# ============================================================
+train = np.load("/home/sat3812/Final_project/Dataset/npz/train.npz")
+val   = np.load("/home/sat3812/Final_project/Dataset/npz/val.npz")
+test  = np.load("/home/sat3812/Final_project/Dataset/npz/test.npz")
 
 X_train, y_train = train["X"], train["y"]
-X_val, y_val     = val["X"],   val["y"]
-X_test, y_test   = test["X"],  test["y"]
+X_val, y_val = val["X"], val["y"]
+X_test, y_test = test["X"], test["y"]
 
-print("Loaded:")
-print("Train:", X_train.shape)
-print("Val:  ", X_val.shape)
-print("Test: ", X_test.shape)
+print("\nLoaded:")
+print("Train:", X_train.shape, "| Labels:", y_train.shape)
+print("Val:  ", X_val.shape, "| Labels:", y_val.shape)
+print("Test: ", X_test.shape, "| Labels:", y_test.shape)
 
-# =====================================================================
-# 3. RESHAPE + CONVERT TO RGB (ResNet requires 3 channels)
-# =====================================================================
-IMG_SIZE = 96     # Smaller = faster CPU inference
-NUM_CLASSES = 7   # 7 emotion classes
+# ============================================================
+# 3. PREPROCESS — ResNet18 expects 3-channel RGB inputs
+# ============================================================
+IMG_SIZE = 96   # small & fast for CPU
+NUM_CLASSES = 7
 
-# Expand grayscale → RGB
 X_train = np.repeat(X_train[..., np.newaxis], 3, axis=-1)
-X_val   = np.repeat(X_val[..., np.newaxis],   3, axis=-1)
-X_test  = np.repeat(X_test[..., np.newaxis],  3, axis=-1)
+X_val   = np.repeat(X_val[..., np.newaxis], 3, axis=-1)
+X_test  = np.repeat(X_test[..., np.newaxis], 3, axis=-1)
 
-# Resize images to 96×96
 X_train = tf.image.resize(X_train, (IMG_SIZE, IMG_SIZE)).numpy()
-X_val   = tf.image.resize(X_val,   (IMG_SIZE, IMG_SIZE)).numpy()
-X_test  = tf.image.resize(X_test,  (IMG_SIZE, IMG_SIZE)).numpy()
+X_val   = tf.image.resize(X_val, (IMG_SIZE, IMG_SIZE)).numpy()
+X_test  = tf.image.resize(X_test, (IMG_SIZE, IMG_SIZE)).numpy()
 
-# =====================================================================
-# 4. LIGHT DATA AUGMENTATION (Improves accuracy significantly)
-# =====================================================================
-data_augmenter = tf.keras.Sequential([
-    tf.keras.layers.RandomFlip("horizontal"),
-    tf.keras.layers.RandomRotation(0.10),
-    tf.keras.layers.RandomZoom(0.15),
-], name="data_augmentation")
+# ============================================================
+# 4. IMPORT RESNET18 FROM TENSORFLOW HUB
+# ============================================================
+import tensorflow_hub as hub
 
-# =====================================================================
-# 5. BUILD RESNET50 TRANSFER LEARNING MODEL
-# =====================================================================
-base_model = ResNet50(
-    include_top=False,
-    weights="imagenet",
+print("\n📥 Loading ResNet18 from TF Hub (light & CPU-safe)...")
+resnet_url = "https://tfhub.dev/tensorflow/resnet_18/classification/1"
+
+base = hub.KerasLayer(
+    resnet_url,
+    trainable=False,  # freeze backbone
     input_shape=(IMG_SIZE, IMG_SIZE, 3)
 )
 
-base_model.trainable = False    # Freeze full backbone (CPU SAFE)
-
+# ============================================================
+# 5. BUILD TRANSFER LEARNING MODEL
+# ============================================================
 inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
-x = data_augmenter(inputs)
-x = base_model(x, training=False)
-x = GlobalAveragePooling2D()(x)
+x = inputs
+x = base(x)
 x = Dense(256, activation="relu")(x)
-x = Dropout(0.4)(x)
+x = Dropout(0.3)(x)
 outputs = Dense(NUM_CLASSES, activation="softmax")(x)
 
 model = Model(inputs, outputs)
@@ -90,81 +76,76 @@ model.compile(
     metrics=["accuracy"]
 )
 
-# Save model summary
-with open(os.path.join(output_dir, "resnet_model_summary.txt"), "w") as f:
+# ============================================================
+# 6. MODEL SUMMARY → SAVE TO TEXT FILE
+# ============================================================
+summary_path = os.path.join(output_dir, "resnet18_model_summary.txt")
+with open(summary_path, "w") as f:
     model.summary(print_fn=lambda x: f.write(x + "\n"))
 
-print("✔ Saved: resnet_model_summary.txt")
+print("✔ Saved: resnet18_model_summary.txt")
 
-# =====================================================================
-# 6. TRAIN RESNET MODEL
-# =====================================================================
-print("\n🔥 Training ResNet50 Transfer Learning Model...\n")
+# ============================================================
+# 7. TRAIN MODEL (CPU Optimized)
+# ============================================================
+print("\n🔥 Training ResNet18 Transfer Learning Model...\n")
 
 history = model.fit(
     X_train, y_train,
     validation_data=(X_val, y_val),
-    epochs=8,            # Perfect for CPU; lightweight
+    epochs=10,
     batch_size=32,
     verbose=2
 )
 
-# =====================================================================
-# 7. SAVE TRAINING CURVE PLOTS
-# =====================================================================
-def save_plot(history, key, filename):
-    plt.figure(figsize=(7, 4))
-    plt.plot(history.history[key], label="Train")
-    plt.plot(history.history["val_" + key], label="Validation")
-    plt.title(f"ResNet TL {key.capitalize()}")
+# ============================================================
+# 8. PLOTS — ACCURACY & LOSS
+# ============================================================
+def save_plot():
+    # Accuracy plot
+    plt.figure(figsize=(7,4))
+    plt.plot(history.history["accuracy"], label="train")
+    plt.plot(history.history["val_accuracy"], label="val")
+    plt.title("ResNet18 Accuracy")
     plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, filename))
+    plt.savefig(os.path.join(output_dir, "accuracy_resnet18.png"))
     plt.close()
 
-save_plot(history, "accuracy", "resnet_accuracy.png")
-save_plot(history, "loss", "resnet_loss.png")
+    # Loss plot
+    plt.figure(figsize=(7,4))
+    plt.plot(history.history["loss"], label="train")
+    plt.plot(history.history["val_loss"], label="val")
+    plt.title("ResNet18 Loss")
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, "loss_resnet18.png"))
+    plt.close()
 
+save_plot()
 print("✔ Saved accuracy & loss plots")
 
-# =====================================================================
-# 8. EVALUATE RESNET ON TEST SET
-# =====================================================================
-pred_probs = model.predict(X_test, verbose=0)
-pred_labels = pred_probs.argmax(axis=1)
+# ============================================================
+# 9. EVALUATE ON TEST SET
+# ============================================================
+preds = model.predict(X_test).argmax(axis=1)
 
-# Classification report
-report = classification_report(y_test, pred_labels)
-with open(os.path.join(output_dir, "resnet_classification_report.txt"), "w") as f:
+print("\n📊 Classification Report:\n")
+report = classification_report(y_test, preds, digits=4)
+print(report)
+
+with open(os.path.join(output_dir, "classification_report_resnet18.txt"), "w") as f:
     f.write(report)
 
-print("\n📄 Classification Report Saved!")
+# ============================================================
+# 10. CONFUSION MATRIX
+# ============================================================
+cm = confusion_matrix(y_test, preds)
 
-# =====================================================================
-# 9. CONFUSION MATRIX
-# =====================================================================
-cm = confusion_matrix(y_test, pred_labels)
-np.save(os.path.join(output_dir, "resnet_confusion_matrix.npy"), cm)
-
-plt.figure(figsize=(7,7))
-plt.imshow(cm, cmap="Blues")
-plt.title("ResNet Confusion Matrix")
-plt.colorbar()
-plt.savefig(os.path.join(output_dir, "resnet_confusion_matrix.png"))
+plt.figure(figsize=(9,7))
+sns.heatmap(cm, annot=True, fmt="d", cmap="viridis")
+plt.title("ResNet18 Confusion Matrix")
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.savefig(os.path.join(output_dir, "confusion_matrix_resnet18.png"))
 plt.close()
 
-print("✔ Confusion matrix saved")
-
-# =====================================================================
-# 10. PREDICTION DISTRIBUTION PLOT
-# =====================================================================
-plt.figure(figsize=(8,4))
-plt.hist(pred_labels, bins=NUM_CLASSES, color="orange")
-plt.title("Prediction Distribution")
-plt.tight_layout()
-plt.savefig(os.path.join(output_dir, "prediction_distribution.png"))
-plt.close()
-
-print("✔ Prediction distribution plot saved")
-
-print("\n🎯 PERSON 2 COMPLETED — All files saved to:", output_dir)
+print("\n✔ PERSON 2 COMPLETE — ResNet18 Transfer Learning Finished.")
