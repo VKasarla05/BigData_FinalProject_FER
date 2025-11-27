@@ -1,126 +1,137 @@
-# ===============================================================
-# PERSON 1 (VM VERSION)
-# Spark + Load NPZ + EDA + Baseline CNN
-# ===============================================================
+# =====================================================================
+# PERSON 1 — Spark + NPZ Loading + EDA + Baseline CNN (VM Version)
+# =====================================================================
 
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
 from collections import Counter
 import tensorflow as tf
-from sklearn.metrics import classification_report, confusion_matrix
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dense, Flatten, Dropout
 from pyspark.sql import SparkSession
 
-# ---------------------------------------------------------------
-# 1. START SPARK SESSION
-# ---------------------------------------------------------------
+# =====================================================================
+# 1. SET PATHS
+# =====================================================================
+npz_path = "/home/sat3812/Final_project/Dataset/npz"
+output_dir = "/home/sat3812/Final_project/Output_p1"
+
+os.makedirs(output_dir, exist_ok=True)
+
+print("NPZ path:", npz_path)
+print("Output directory:", output_dir)
+
+# =====================================================================
+# 2. START SPARK
+# =====================================================================
 spark = SparkSession.builder \
-    .appName("FER_Person1_NPZ_Project") \
+    .appName("Person1-NPZ-Processing") \
     .master("local[*]") \
     .config("spark.driver.memory", "4g") \
     .getOrCreate()
 
-print("✔ Spark started on:", spark.sparkContext.master)
+print("\n✔ Spark started on:", spark.sparkContext.master)
 
-# ---------------------------------------------------------------
-# 2. LOAD NPZ FILES FROM VM
-# ---------------------------------------------------------------
-npz_path = "/home/sat3812/Final_project/Dataset/npz"
-
-train_npz = np.load(f"{npz_path}/train.npz")
-val_npz   = np.load(f"{npz_path}/val.npz")
-test_npz  = np.load(f"{npz_path}/test.npz")
+# =====================================================================
+# 3. LOAD NPZ FILES
+# =====================================================================
+train_npz = np.load(os.path.join(npz_path, "train.npz"))
+val_npz   = np.load(os.path.join(npz_path, "val.npz"))
+test_npz  = np.load(os.path.join(npz_path, "test.npz"))
 
 X_train, y_train = train_npz["X"], train_npz["y"]
 X_val,   y_val   = val_npz["X"],   val_npz["y"]
 X_test,  y_test  = test_npz["X"],  test_npz["y"]
 
-print("✔ Loaded NPZ files")
-
-# ---------------------------------------------------------------
-# 3. PRINT SHAPES
-# ---------------------------------------------------------------
 print("\n===== DATA SHAPES =====")
 print("Train:", X_train.shape, "| Labels:", y_train.shape)
 print("Val:  ", X_val.shape,   "| Labels:", y_val.shape)
 print("Test: ", X_test.shape,  "| Labels:", y_test.shape)
 
-# ---------------------------------------------------------------
-# 4. EDA — Class Distribution
-# ---------------------------------------------------------------
-emotion_map = {
+# =====================================================================
+# 4. NORMALIZE + RESHAPE FOR CNN
+# =====================================================================
+IMG_SIZE = 48
+
+X_train = X_train.reshape(-1, IMG_SIZE, IMG_SIZE, 1)
+X_val   = X_val.reshape(-1, IMG_SIZE, IMG_SIZE, 1)
+X_test  = X_test.reshape(-1, IMG_SIZE, IMG_SIZE, 1)
+
+print("\n✔ Reshaped for CNN:", X_train.shape)
+
+# =====================================================================
+# 5. CLASS LABELS
+# =====================================================================
+EMOTION_MAP = {
     0: "angry", 1: "disgust", 2: "fear",
     3: "happy", 4: "neutral", 5: "sad", 6: "surprise"
 }
 
-def plot_distribution(y, title):
-    counts = Counter(y)
-    labels = [emotion_map[i] for i in sorted(counts.keys())]
-    values = [counts[i] for i in sorted(counts.keys())]
+# =====================================================================
+# 6. EDA — CLASS DISTRIBUTION
+# =====================================================================
+def plot_class_distribution(y, filename):
+    count = Counter(y)
+    labels = list(EMOTION_MAP.values())
+    values = [count.get(i, 0) for i in range(len(labels))]
 
     plt.figure(figsize=(8,5))
-    plt.bar(labels, values)
+    plt.bar(labels, values, color="skyblue")
     plt.xticks(rotation=45)
-    plt.title(title)
+    plt.title("Class Distribution")
     plt.tight_layout()
-    plt.savefig(f"{title.replace(' ','_')}.png")
-    plt.show()
+    plt.savefig(os.path.join(output_dir, filename))
+    plt.close()
 
-plot_distribution(y_train, "Train Class Distribution")
-plot_distribution(y_val,   "Validation Class Distribution")
-plot_distribution(y_test,  "Test Class Distribution")
+plot_class_distribution(y_train, "class_distribution.png")
+print("✔ Saved:", "class_distribution.png")
 
-# ---------------------------------------------------------------
-# 5. SAMPLE IMAGES
-# ---------------------------------------------------------------
-def show_samples(X, y):
+# =====================================================================
+# 7. EDA — SAMPLE IMAGES GRID
+# =====================================================================
+def save_sample_images(X, y, filename):
     plt.figure(figsize=(6,6))
-    indices = np.random.choice(len(X), 9, replace=False)
+    idx = np.random.choice(len(X), 9, replace=False)
 
-    for i, idx in enumerate(indices):
+    for i, index in enumerate(idx):
         plt.subplot(3,3,i+1)
-        plt.imshow(X[idx], cmap="gray")
-        plt.title(emotion_map[y[idx]])
+        plt.imshow(X[index].reshape(48,48), cmap="gray")
+        plt.title(EMOTION_MAP[y[index]])
         plt.axis("off")
 
     plt.tight_layout()
-    plt.savefig("Sample_Images.png")
-    plt.show()
+    plt.savefig(os.path.join(output_dir, filename))
+    plt.close()
 
-show_samples(X_train, y_train)
+save_sample_images(X_train, y_train, "sample_images.png")
+print("✔ Saved:", "sample_images.png")
 
-# ---------------------------------------------------------------
-# 6. PREPARE FOR CNN
-# ---------------------------------------------------------------
-X_train_cnn = X_train.reshape(-1, 48, 48, 1)
-X_val_cnn   = X_val.reshape(-1, 48, 48, 1)
-X_test_cnn  = X_test.reshape(-1, 48, 48, 1)
+# =====================================================================
+# 8. BASELINE CNN MODEL
+# =====================================================================
+def build_baseline_cnn():
+    model = Sequential([
+        Conv2D(32, (3,3), activation="relu", padding="same", input_shape=(48,48,1)),
+        MaxPooling2D(),
 
-# ---------------------------------------------------------------
-# 7. BASELINE CNN MODEL
-# ---------------------------------------------------------------
-def get_baseline_cnn():
-    model = tf.keras.Sequential([
-        tf.keras.layers.Conv2D(32, (3,3), activation="relu", padding="same",
-                               input_shape=(48, 48, 1)),
-        tf.keras.layers.MaxPooling2D(),
+        Conv2D(64, (3,3), activation="relu", padding="same"),
+        MaxPooling2D(),
 
-        tf.keras.layers.Conv2D(64, (3,3), activation="relu", padding="same"),
-        tf.keras.layers.MaxPooling2D(),
+        Conv2D(128, (3,3), activation="relu", padding="same"),
+        MaxPooling2D(),
 
-        tf.keras.layers.Conv2D(128, (3,3), activation="relu", padding="same"),
-        tf.keras.layers.MaxPooling2D(),
+        Flatten(),
+        Dense(128, activation="relu"),
+        Dropout(0.3),
 
-        tf.keras.layers.Flatten(),
-        tf.keras.layers.Dense(128, activation="relu"),
-        tf.keras.layers.Dropout(0.3),
-
-        tf.keras.layers.Dense(7, activation="softmax")
+        Dense(7, activation="softmax")
     ])
     return model
 
-model = get_baseline_cnn()
-model.summary()
+model = build_baseline_cnn()
 
 model.compile(
     optimizer="adam",
@@ -128,51 +139,70 @@ model.compile(
     metrics=["accuracy"]
 )
 
-# ---------------------------------------------------------------
-# 8. TRAIN BASELINE CNN
-# ---------------------------------------------------------------
+# Save model summary
+with open(os.path.join(output_dir, "cnn_model_summary.txt"), "w") as f:
+    model.summary(print_fn=lambda x: f.write(x + "\n"))
+
+print("✔ Saved: cnn_model_summary.txt")
+
+# =====================================================================
+# 9. TRAIN BASELINE CNN
+# =====================================================================
 history = model.fit(
-    X_train_cnn, y_train,
-    validation_data=(X_val_cnn, y_val),
+    X_train, y_train,
+    validation_data=(X_val, y_val),
     epochs=15,
-    batch_size=64
+    batch_size=64,
+    verbose=2
 )
 
-# ---------------------------------------------------------------
-# 9. ACCURACY / LOSS PLOT
-# ---------------------------------------------------------------
-plt.figure()
-plt.plot(history.history["accuracy"])
-plt.plot(history.history["val_accuracy"])
-plt.title("Baseline CNN Accuracy")
-plt.legend(["Train", "Val"])
-plt.savefig("Baseline_Accuracy.png")
-plt.show()
+# =====================================================================
+# 10. TRAINING PLOTS
+# =====================================================================
+def save_history_plot(history, key, filename):
+    plt.figure()
+    plt.plot(history.history[key], label="train")
+    plt.plot(history.history["val_" + key], label="val")
+    plt.title(key.upper())
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, filename))
+    plt.close()
 
-plt.figure()
-plt.plot(history.history["loss"])
-plt.plot(history.history["val_loss"])
-plt.title("Baseline CNN Loss")
-plt.legend(["Train", "Val"])
-plt.savefig("Baseline_Loss.png")
-plt.show()
+save_history_plot(history, "accuracy", "baseline_accuracy.png")
+save_history_plot(history, "loss", "baseline_loss.png")
 
-# ---------------------------------------------------------------
-# 10. EVALUATE ON TEST SET
-# ---------------------------------------------------------------
-y_pred = model.predict(X_test_cnn).argmax(axis=1)
+print("✔ Saved training plots")
 
-print("\n===== Classification Report =====")
-print(classification_report(y_test, y_pred, target_names=list(emotion_map.values())))
+# =====================================================================
+# 11. TEST EVALUATION
+# =====================================================================
+y_pred = model.predict(X_test).argmax(axis=1)
 
-print("\n===== Confusion Matrix =====")
-print(confusion_matrix(y_test, y_pred))
+# Classification report
+report = classification_report(y_test, y_pred, target_names=list(EMOTION_MAP.values()))
+with open(os.path.join(output_dir, "baseline_report.txt"), "w") as f:
+    f.write(report)
 
-# ---------------------------------------------------------------
-# 11. SAVE MODEL
-# ---------------------------------------------------------------
-model.save("Baseline_CNN_Model")
+print("\n✔ Classification Report Saved")
 
-print("\n✔ PERSON 1 COMPLETED SUCCESSFULLY.")
+# =====================================================================
+# 12. CONFUSION MATRIX
+# =====================================================================
+cm = confusion_matrix(y_test, y_pred)
+np.save(os.path.join(output_dir, "baseline_confusion_matrix.npy"), cm)
 
+# Plot confusion matrix
+plt.figure(figsize=(7,7))
+plt.imshow(cm, cmap="Blues")
+plt.title("Confusion Matrix")
+plt.colorbar()
+plt.savefig(os.path.join(output_dir, "baseline_confusion_matrix.png"))
+plt.close()
+
+print("✔ Saved confusion matrix")
+
+# =====================================================================
+# 13. STOP SPARK
+# =====================================================================
 spark.stop()
+print("\n🌟 PERSON 1 COMPLETE — All outputs saved to:", output_dir)
