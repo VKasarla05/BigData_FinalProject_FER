@@ -1,173 +1,166 @@
-# ==============================================================
-# Transfer Learning with MobileNetV2
-# ==============================================================
-
 import os
 import numpy as np
 import tensorflow as tf
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 from pyspark.sql import SparkSession
 
-# ==============================================================
-# 1. SPARK INITIALIZATION 
-# ==============================================================
 
-spark = SparkSession.builder \
-    .appName("TransferL-MobileNetV2") \
-    .master("spark://hadoop1:7077") \
-    .config("spark.executor.instances", "2") \
-    .config("spark.executor.cores", "2") \
-    .config("spark.driver.memory", "4g") \
-    .getOrCreate()
+def main():
+    # ==============================================================
+    # 1. START SPARK SESSION (required by project)
+    # ==============================================================
+    spark = SparkSession.builder \
+        .appName("Person2-TransferLearning") \
+        .master("spark://192.168.13.134:7077") \
+        .config("spark.driver.memory", "4g") \
+        .config("spark.executor.memory", "4g") \
+        .getOrCreate()
 
-print("Spark started on:", spark.sparkContext.master)
+    print("Spark session started")
+    print("Spark master:", spark.sparkContext.master)
+    print("Spark workers:", spark.sparkContext._jsc.sc().statusTracker().getExecutorInfos().length)
 
-# ==============================================================
-# 2. OUTPUT DIRECTORY
-# ==============================================================
+    # ==============================================================
+    # 2. OUTPUT DIRECTORY
+    # ==============================================================
+    output_dir = "/home/sat3812/Final_project/Output_2"
+    os.makedirs(output_dir, exist_ok=True)
+    print("Saving Person2 outputs to:", output_dir)
 
-output_dir = "/home/sat3812/Final_project/OutputP2"
-os.makedirs(output_dir, exist_ok=True)
+    # ==============================================================
+    # 3. LOAD NPZ FILES
+    # ==============================================================
+    train = np.load("/home/sat3812/Final_project/Dataset/npz/train.npz")
+    val   = np.load("/home/sat3812/Final_project/Dataset/npz/val.npz")
+    test  = np.load("/home/sat3812/Final_project/Dataset/npz/test.npz")
 
-print("Saving Person2 outputs to:", output_dir)
+    X_train, y_train = train["X"], train["y"]
+    X_val, y_val     = val["X"],   val["y"]
+    X_test, y_test   = test["X"],  test["y"]
 
-# ==============================================================
-# 3. LOAD NPZ FILES
-# ==============================================================
+    print("Loaded NPZ:")
+    print("Train:", X_train.shape, "Labels:", len(y_train))
+    print("Val:  ", X_val.shape,   "Labels:", len(y_val))
+    print("Test: ", X_test.shape,  "Labels:", len(y_test))
 
-npz_base = "/home/sat3812/Final_project/Dataset/npz"
-train = np.load(f"{npz_base}/train.npz")
-val   = np.load(f"{npz_base}/val.npz")
-test  = np.load(f"{npz_base}/test.npz")
+    # ==============================================================
+    # 4. PREPROCESSING
+    # ==============================================================
+    IMG_SIZE = 96
 
-X_train, y_train = train["X"], train["y"]
-X_val,   y_val   = val["X"],   val["y"]
-X_test,  y_test  = test["X"],  test["y"]
+    def prep_images(X):
+        X = np.repeat(X[..., np.newaxis], 3, axis=-1)
+        X = tf.image.resize(X, (IMG_SIZE, IMG_SIZE)).numpy()
+        return X
 
-print("Dataset loaded:")
-print("Train:", X_train.shape)
-print("Val:",   X_val.shape)
-print("Test:",  X_test.shape)
+    print("Preprocessing...")
+    X_train = prep_images(X_train)
+    X_val   = prep_images(X_val)
+    X_test  = prep_images(X_test)
+    print("Final image shape:", X_train.shape)
 
-# ==============================================================
-# 4. PREPROCESSING (Resize + Convert to RGB)
-# ==============================================================
+    # ==============================================================
+    # 5. BUILD TRANSFER LEARNING MODEL
+    # ==============================================================
+    print("Building MobileNetV2 model...")
 
-IMG_SIZE = 96   # MobileNetV2-compatible
+    base_model = tf.keras.applications.MobileNetV2(
+        input_shape=(IMG_SIZE, IMG_SIZE, 3),
+        include_top=False,
+        weights="imagenet"
+    )
+    base_model.trainable = False
 
-def preprocess(X):
-    X = np.repeat(X[..., np.newaxis], 3, axis=-1)
-    X = tf.image.resize(X, (IMG_SIZE, IMG_SIZE)).numpy()
-    return X
+    x = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
+    x = tf.keras.layers.Dense(128, activation="relu")(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+    output = tf.keras.layers.Dense(7, activation="softmax")(x)
 
-X_train = preprocess(X_train)
-X_val   = preprocess(X_val)
-X_test  = preprocess(X_test)
+    model = tf.keras.Model(inputs=base_model.input, outputs=output)
 
-print("Final preprocessed shape:", X_train.shape)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-4),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
 
-# ==============================================================
-# 5. BUILD TRANSFER LEARNING MODEL (MobileNetV2)
-# ==============================================================
+    # Save model summary
+    with open(os.path.join(output_dir, "mobilenet_model_summary.txt"), "w") as f:
+        model.summary(print_fn=lambda x: f.write(x + "\n"))
 
-base_model = tf.keras.applications.MobileNetV2(
-    input_shape=(IMG_SIZE, IMG_SIZE, 3),
-    include_top=False,
-    weights="imagenet"
-)
+    # ==============================================================
+    # 6. TRAIN MODEL
+    # ==============================================================
+    print("Training MobileNetV2...")
 
-base_model.trainable = False   # Freeze CNN backbone
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=12,
+        batch_size=64,
+        verbose=2
+    )
 
-# Classification head
-x = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
-x = tf.keras.layers.Dense(128, activation="relu")(x)
-x = tf.keras.layers.Dropout(0.3)(x)
-out = tf.keras.layers.Dense(7, activation="softmax")(x)
+    # ==============================================================
+    # 7. SAVE TRAINING PLOTS
+    # ==============================================================
+    plt.figure(figsize=(7, 5))
+    plt.plot(history.history["accuracy"], label="Train")
+    plt.plot(history.history["val_accuracy"], label="Val")
+    plt.title("MobileNetV2 Accuracy")
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, "accuracy_plot.png"))
+    plt.close()
 
-model = tf.keras.Model(inputs=base_model.input, outputs=out)
+    plt.figure(figsize=(7, 5))
+    plt.plot(history.history["loss"], label="Train")
+    plt.plot(history.history["val_loss"], label="Val")
+    plt.title("MobileNetV2 Loss")
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, "loss_plot.png"))
+    plt.close()
 
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(1e-4),
-    loss="sparse_categorical_crossentropy",
-    metrics=["accuracy"]
-)
+    # ==============================================================
+    # 8. TEST EVALUATION
+    # ==============================================================
+    print("Evaluating on test set...")
 
-# Save model summary
-with open(os.path.join(output_dir, "mobilenetv2_model_summary.txt"), "w") as f:
-    model.summary(print_fn=lambda x: f.write(x + "\n"))
+    y_pred = model.predict(X_test, verbose=2).argmax(axis=1)
 
-print("Model summary saved.")
+    report = classification_report(y_test, y_pred)
+    cm = confusion_matrix(y_test, y_pred)
 
-# ==============================================================
-# 6. TRAIN MODEL
-# ==============================================================
+    with open(os.path.join(output_dir, "classification_report.txt"), "w") as f:
+        f.write(report)
 
-history = model.fit(
-    X_train, y_train,
-    validation_data=(X_val, y_val),
-    epochs=12,
-    batch_size=64,
-    verbose=2
-)
+    # Confusion matrix plot
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    plt.title("MobileNetV2 Confusion Matrix")
+    plt.savefig(os.path.join(output_dir, "confusion_matrix.png"))
+    plt.close()
 
-# ==============================================================
-# 7. SAVE TRAINING PLOTS
-# ==============================================================
+    # Save model
+    model.save(os.path.join(output_dir, "mobilenetv2_person2.h5"))
+    print("Saved Person2 model.")
 
-plt.figure(figsize=(7,5))
-plt.plot(history.history["accuracy"], label="Train")
-plt.plot(history.history["val_accuracy"], label="Val")
-plt.title("MobileNetV2 Accuracy")
-plt.legend()
-plt.savefig(f"{output_dir}/accuracy_plot.png")
-plt.close()
+    # ==============================================================
+    # 9. STOP SPARK SESSION
+    # ==============================================================
+    spark.stop()
+    print("Spark session stopped")
+    print("Person2 completed successfully.")
 
-plt.figure(figsize=(7,5))
-plt.plot(history.history["loss"], label="Train")
-plt.plot(history.history["val_loss"], label="Val")
-plt.title("MobileNetV2 Loss")
-plt.legend()
-plt.savefig(f"{output_dir}/loss_plot.png")
-plt.close()
 
-print("Training plots saved.")
+if __name__ == "__main__":
+    # Disable GPU to prevent CUDA errors
+    try:
+        tf.config.set_visible_devices([], "GPU")
+    except:
+        pass
 
-# ==============================================================
-# 8. EVALUATE ON TEST SET
-# ==============================================================
-
-pred = model.predict(X_test).argmax(axis=1)
-
-report = classification_report(y_test, pred)
-cm = confusion_matrix(y_test, pred)
-
-# Save report
-with open(f"{output_dir}/classification_report.txt", "w") as f:
-    f.write(report)
-
-# Plot confusion matrix
-plt.figure(figsize=(8,6))
-sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
-plt.title("MobileNetV2 Confusion Matrix")
-plt.savefig(f"{output_dir}/confusion_matrix.png")
-plt.close()
-
-print("Classification report and confusion matrix saved.")
-
-# ==============================================================
-# 9. SAVE TRAINED MODEL
-# ==============================================================
-
-model_path = f"{output_dir}/mobilenetv2_person2.h5"
-model.save(model_path)
-
-print("Model saved to:", model_path)
-
-# ==============================================================
-# 10. STOP SPARK
-# ==============================================================
-
-spark.stop()
-print("Transfer learning processing complete.")
+    main()
