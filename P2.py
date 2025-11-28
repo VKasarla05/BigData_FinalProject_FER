@@ -124,6 +124,8 @@ sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
 plt.title("MobileNetV2 Confusion Matrix")
 plt.savefig(os.path.join(output_dir, "confusion_matrix.png"))
 plt.close()
+model.save("/home/sat3812/Final_project/Output_2/mobilenetv2_person2.h5")
+print("Saved Person2 model successfully.")
 
 print(report)
 print("\n🔥 PERSON 2 COMPLETE — MobileNetV2 Transfer Learning finished!")
