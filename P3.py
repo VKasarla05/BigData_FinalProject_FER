@@ -2,148 +2,131 @@ import os
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
 
-# ==============================================================
-# 1. OUTPUT DIRECTORY
-# ==============================================================
-output_dir = "/home/sat3812/Final_project/Output_3"
-os.makedirs(output_dir, exist_ok=True)
-print("Saving Person3 outputs to:", output_dir)
+# ================================
+# PATHS (MATCHING YOUR VM)
+# ================================
+BASE = "/home/sat3812/Final_project"
+NPZ_PATH = f"{BASE}/Dataset/npz"
+OUTPUT = f"{BASE}/Output_3"
+MODEL_FROM_P2 = f"{BASE}/Output_2/mobilenetv2_person2.h5"
 
-# ==============================================================
-# 2. LOAD SAME NPZ FILES FROM PERSON1
-# ==============================================================
-train = np.load("/home/sat3812/Final_project/Dataset/npz/train.npz")
-val   = np.load("/home/sat3812/Final_project/Dataset/npz/val.npz")
-test  = np.load("/home/sat3812/Final_project/Dataset/npz/test.npz")
+os.makedirs(OUTPUT, exist_ok=True)
+
+print("Saving all Person3 outputs to:", OUTPUT)
+
+# ================================
+# LOAD NPZ FILES
+# ================================
+train = np.load(f"{NPZ_PATH}/train.npz")
+val   = np.load(f"{NPZ_PATH}/val.npz")
+test  = np.load(f"{NPZ_PATH}/test.npz")
 
 X_train, y_train = train["X"], train["y"]
 X_val, y_val     = val["X"],   val["y"]
 X_test, y_test   = test["X"],  test["y"]
 
-print("Loaded:")
-print("Train:", X_train.shape)
-print("Val:  ", X_val.shape)
-print("Test: ", X_test.shape)
+print("\nLoaded:")
+print("Train:", X_train.shape, "| Labels:", len(y_train))
+print("Val:  ", X_val.shape,   "| Labels:", len(y_val))
+print("Test: ", X_test.shape,  "| Labels:", len(y_test))
 
-# ==============================================================
-# 3. PREPROCESSING — RESIZE + 3-CHANNEL RGB
-# ==============================================================
+# MobileNetV2 expects 96×96×3
 IMG_SIZE = 96
 
-def prep(X):
-    X = np.repeat(X[..., np.newaxis], 3, axis=-1)
-    return tf.image.resize(X, (IMG_SIZE, IMG_SIZE)).numpy()
+def preprocess(x):
+    x = np.repeat(x[..., np.newaxis], 3, axis=-1)
+    x = tf.image.resize(x, (IMG_SIZE, IMG_SIZE)).numpy()
+    return x
 
-X_train = prep(X_train)
-X_val   = prep(X_val)
-X_test  = prep(X_test)
+X_train = preprocess(X_train)
+X_val   = preprocess(X_val)
+X_test  = preprocess(X_test)
 
-# ==============================================================
-# 4. DATA AUGMENTATION (STRONGER THAN PERSON 2)
-# ==============================================================
-data_aug = tf.keras.Sequential([
-    tf.keras.layers.RandomFlip("horizontal"),
-    tf.keras.layers.RandomRotation(0.15),
-    tf.keras.layers.RandomZoom(0.2),
-    tf.keras.layers.RandomContrast(0.2)
-])
+print("Final image shape:", X_train.shape)
 
-# ==============================================================
-# 5. LOAD MOBILENETV2 BASE MODEL
-#    BUT NOW WE WILL FINE-TUNE LAST 25 LAYERS
-# ==============================================================
-base_model = tf.keras.applications.MobileNetV2(
-    input_shape=(IMG_SIZE, IMG_SIZE, 3),
-    include_top=False,
-    weights="imagenet"
-)
+# ================================
+# LOAD PERSON2 MODEL
+# ================================
+print("\n🔄 Loading Person2 MobileNetV2 model...")
+model = tf.keras.models.load_model(MODEL_FROM_P2)
+print("Model loaded successfully!")
 
-# 🔓 Unfreeze top 25 layers for fine-tuning
-for layer in base_model.layers[:-25]:
-    layer.trainable = False
-for layer in base_model.layers[-25:]:
+model.summary()
+
+# ================================
+# UNFREEZE TOP LAYERS (Light Finetuning)
+# ================================
+print("\n🔧 Unfreezing last 20 layers for Person3 fine-tuning...")
+for layer in model.layers[-20:]:
     layer.trainable = True
 
-# ==============================================================
-# 6. BUILD FINE-TUNING MODEL
-# ==============================================================
-
-inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
-x = data_aug(inputs)  # apply augmentation
-x = tf.keras.applications.mobilenet_v2.preprocess_input(x)
-
-x = base_model(x, training=True)
-x = tf.keras.layers.GlobalAveragePooling2D()(x)
-
-# TRY MULTIPLE UNITS (PERSON-3 CONTRIBUTION)
-x = tf.keras.layers.Dense(256, activation="relu")(x)
-x = tf.keras.layers.Dropout(0.4)(x)
-
-outputs = tf.keras.layers.Dense(7, activation="softmax")(x)
-model = tf.keras.Model(inputs, outputs)
-
-# SMALL LR for Fine-tuning
 model.compile(
     optimizer=tf.keras.optimizers.Adam(1e-5),
     loss="sparse_categorical_crossentropy",
     metrics=["accuracy"]
 )
 
-# Save summary
-with open(os.path.join(output_dir, "P3_finetuned_summary.txt"), "w") as f:
-    model.summary(print_fn=lambda x: f.write(x + "\n"))
-
-# ==============================================================
-# 7. TRAIN — Fine-tuning (slow but effective)
-# ==============================================================
-print("\n🔥 Training Person3 Fine-Tuning Model...\n")
+# ================================
+# TRAIN FOR PERSON3
+# ================================
+print("\n🔥 Starting Person3 fine-tuning...\n")
 
 history = model.fit(
     X_train, y_train,
     validation_data=(X_val, y_val),
-    epochs=10,
+    epochs=5,
     batch_size=64,
     verbose=2
 )
 
-# ==============================================================
-# 8. SAVE ACCURACY + LOSS PLOTS
-# ==============================================================
-plt.figure(figsize=(7,5))
-plt.plot(history.history["accuracy"], label="Train")
-plt.plot(history.history["val_accuracy"], label="Val")
-plt.title("P3 Fine-Tuned Model Accuracy")
+# ================================
+# PLOTS
+# ================================
+plt.figure(figsize=(6,4))
+plt.plot(history.history["accuracy"], label="train")
+plt.plot(history.history["val_accuracy"], label="val")
 plt.legend()
-plt.savefig(os.path.join(output_dir, "accuracy_P3.png"))
+plt.title("Person3 Accuracy Curve")
+plt.savefig(f"{OUTPUT}/accuracy_plot_p3.png")
 plt.close()
 
-plt.figure(figsize=(7,5))
-plt.plot(history.history["loss"], label="Train")
-plt.plot(history.history["val_loss"], label="Val")
-plt.title("P3 Fine-Tuned Model Loss")
+plt.figure(figsize=(6,4))
+plt.plot(history.history["loss"], label="train")
+plt.plot(history.history["val_loss"], label="val")
 plt.legend()
-plt.savefig(os.path.join(output_dir, "loss_P3.png"))
+plt.title("Person3 Loss Curve")
+plt.savefig(f"{OUTPUT}/loss_plot_p3.png")
 plt.close()
 
-# ==============================================================
-# 9. TEST EVALUATION
-# ==============================================================
-pred = model.predict(X_test).argmax(axis=1)
+print("Saved accuracy & loss plots.")
 
-report = classification_report(y_test, pred)
-cm = confusion_matrix(y_test, pred)
+# ================================
+# EVALUATION ON TEST SET
+# ================================
+print("\n📊 Evaluating on Test Set...")
+preds = model.predict(X_test).argmax(axis=1)
 
-with open(os.path.join(output_dir, "classification_report_P3.txt"), "w") as f:
+report = classification_report(y_test, preds)
+print(report)
+
+with open(f"{OUTPUT}/classification_report_p3.txt", "w") as f:
     f.write(report)
 
-plt.figure(figsize=(8,6))
-sns.heatmap(cm, annot=True, cmap="Blues", fmt="d")
-plt.title("Confusion Matrix — Person3")
-plt.savefig(os.path.join(output_dir, "cm_P3.png"))
+cm = confusion_matrix(y_test, preds)
+plt.figure(figsize=(7,6))
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+plt.title("Person3 Confusion Matrix")
+plt.savefig(f"{OUTPUT}/confusion_matrix_p3.png")
 plt.close()
 
-print(report)
-print("\n🎉 PERSON 3 COMPLETE — Fine-Tuned Model Saved!\n")
+# ================================
+# SAVE FINAL PERSON3 MODEL
+# ================================
+FINAL_MODEL = f"{OUTPUT}/mobilenetv2_person3_finetuned.h5"
+model.save(FINAL_MODEL)
+print("💾 Saved Person3 final model to:", FINAL_MODEL)
+
+print("\n🚀 PERSON 3 COMPLETE — Fine-tuning finished successfully!")
