@@ -145,7 +145,7 @@ def main():
     plt.close()
 
     # Save model
-    model.save(os.path.join(output_dir, "mobilenetv2_person2.h5"))
+    model.save(os.path.join(output_dir, "mobilenetv2P2.h5"))
     print("Saved Person2 model.")
 
     # ==============================================================
