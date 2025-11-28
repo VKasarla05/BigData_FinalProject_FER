@@ -1,73 +1,84 @@
 # ===============================================================
-# PERSON 4 — Model Evaluation + Interpretability (Grad-CAM)
+# PERSON 4 — Model Interpretability & Final Evaluation
 # ===============================================================
 
 import os
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
 
 # ===============================================================
-# 1. PATHS
+# 1. SET OUTPUT DIRECTORY
 # ===============================================================
-NPZ_PATH = "/home/sat3812/Final_project/Dataset/npz"
-MODEL_PATH = "/home/sat3812/Final_project/Output_3/mobilenetv2_person3_finetuned.h5"
 OUTPUT_DIR = "/home/sat3812/Final_project/Output_4"
-
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-print("Saving Person4 outputs to:", OUTPUT_DIR)
 
+print(f"Saving Person4 outputs to: {OUTPUT_DIR}")
 
 # ===============================================================
 # 2. LOAD NPZ FILES
 # ===============================================================
-train = np.load(f"{NPZ_PATH}/train.npz")
-val = np.load(f"{NPZ_PATH}/val.npz")
-test = np.load(f"{NPZ_PATH}/test.npz")
+npz_path = "/home/sat3812/Final_project/Dataset/npz"
 
-X_test, y_test = test["X"], test["y"]
+train = np.load(f"{npz_path}/train.npz")
+val   = np.load(f"{npz_path}/val.npz")
+test  = np.load(f"{npz_path}/test.npz")
+
+X_train, y_train = train["X"], train["y"]
+X_val, y_val     = val["X"],   val["y"]
+X_test, y_test   = test["X"], test["y"]
 
 print("Loaded NPZ files")
-print("Test:", X_test.shape, "| Labels:", y_test.shape)
+print("Shapes:")
+print("Train:", X_train.shape, "| Labels:", len(y_train))
+print("Val:  ", X_val.shape,   "| Labels:", len(y_val))
+print("Test: ", X_test.shape,  "| Labels:", len(y_test))
 
-# Resize images for MobileNetV2 (96x96 RGB)
-X_test = np.repeat(X_test[..., np.newaxis], 3, axis=-1)
-X_test = tf.image.resize(X_test, (96, 96)).numpy()
-
-
-# ===============================================================
-# 3. LOAD TRAINED MODEL (Person3)
-# ===============================================================
-print("\nLoading Person3 model...")
-model = tf.keras.models.load_model(MODEL_PATH)
-print("Model loaded successfully!")
-
+# Add channel dimension for CNN
+X_test = X_test[..., np.newaxis]
 
 # ===============================================================
-# 4. EVALUATE MODEL
+# 3. LOAD PERSON-3 FINE-TUNED MODEL
+# ===============================================================
+model_path = "/home/sat3812/Final_project/Output_3/mobilenetv2_person3_finetuned.h5"
+print(f"\nLoading Person3 model from: {model_path}")
+
+model = tf.keras.models.load_model(model_path)
+print("✔ Model loaded successfully!")
+
+# ===============================================================
+# 4. EVALUATE ON TEST SET
 # ===============================================================
 print("\nEvaluating on Test Set...")
-test_loss, test_acc = model.evaluate(X_test, y_test, verbose=1)
-print("Test accuracy:", test_acc)
+test_loss, test_acc = model.evaluate(X_test, y_test, verbose=2)
+print("\nTest accuracy:", test_acc)
 print("Test loss:", test_loss)
 
-# Predictions
-preds = model.predict(X_test).argmax(axis=1)
+# ===============================================================
+# 5. PREDICT ON TEST SET
+# ===============================================================
+print("\nRunning predictions on test set...")
+pred_probs = model.predict(X_test, verbose=0)
+preds = np.argmax(pred_probs, axis=1)
 
-# Save classification report
+# ===============================================================
+# 6. SAVE CLASSIFICATION REPORT
+# ===============================================================
 report = classification_report(y_test, preds)
-with open(f"{OUTPUT_DIR}/classification_report.txt", "w") as f:
+report_path = f"{OUTPUT_DIR}/classification_report.txt"
+
+with open(report_path, "w") as f:
     f.write(report)
 
-print("\nClassification report saved.")
-
+print(f"Classification report saved to: {report_path}")
 
 # ===============================================================
-# 5. CONFUSION MATRIX
+# 7. SAVE CONFUSION MATRIX PLOT
 # ===============================================================
 cm = confusion_matrix(y_test, preds)
+
 plt.figure(figsize=(8, 6))
 sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
 plt.title("Confusion Matrix")
@@ -76,115 +87,93 @@ plt.ylabel("True")
 plt.tight_layout()
 plt.savefig(f"{OUTPUT_DIR}/confusion_matrix.png")
 plt.close()
+
 print("Confusion matrix saved.")
 
-
 # ===============================================================
-# 6. AUTO-FIND LAST CONV LAYER FOR GRAD-CAM
+# 8. GRAD-CAM IMPLEMENTATION
 # ===============================================================
-def find_last_conv_layer(model):
-    """Automatically detect last Conv2D layer in functional/nested models."""
-    # Search top-level layers
-    for layer in reversed(model.layers):
-        if isinstance(layer, tf.keras.layers.Conv2D):
-            print(f"✔ Last Conv layer found: {layer.name}")
-            return layer.name
+def make_gradcam_heatmap(img, model, last_conv_name, pred_index=None):
 
-    # Search nested layers (MobileNetV2 case)
-    for layer in reversed(model.layers):
-        if hasattr(layer, 'layers'):
-            for sub in reversed(layer.layers):
-                if isinstance(sub, tf.keras.layers.Conv2D):
-                    print(f"✔ Last Conv layer found inside nested block: {sub.name}")
-                    return sub.name
-
-    raise ValueError("❌ No Conv2D layer found for Grad-CAM.")
-
-
-last_conv_layer_name = find_last_conv_layer(model)
-
-# Build Grad-CAM model
-grad_model = tf.keras.models.Model(
-    [model.inputs],
-    [model.get_layer(last_conv_layer_name).output, model.output]
-)
-
-
-# ===============================================================
-# 7. GRAD-CAM FUNCTION
-# ===============================================================
-def generate_gradcam(image_array, label, save_path):
-    """Generate & save Grad-CAM heatmap."""
-    img_tensor = tf.expand_dims(image_array, axis=0)
+    grad_model = tf.keras.models.Model(
+        inputs=model.inputs,
+        outputs=[model.get_layer(last_conv_name).output, model.output]
+    )
 
     with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model(img_tensor)
-        class_idx = tf.argmax(predictions[0])
-        loss = predictions[:, class_idx]
+        conv_outputs, predictions = grad_model(np.expand_dims(img, axis=0))
+        if pred_index is None:
+            pred_index = tf.argmax(predictions[0])
+        class_channel = predictions[:, pred_index]
 
-    # Compute gradients
-    grads = tape.gradient(loss, conv_outputs)[0]
+    grads = tape.gradient(class_channel, conv_outputs)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
     conv_outputs = conv_outputs[0]
 
-    weights = tf.reduce_mean(grads, axis=(0, 1))
-    cam = np.zeros(conv_outputs.shape[:2], dtype=np.float32)
-
-    for i, w in enumerate(weights):
-        cam += w * conv_outputs[:, :, i]
-
-    cam = np.maximum(cam, 0)
-    cam = cam / np.max(cam)
-
-    # Resize heatmap
-    heatmap = tf.image.resize(cam[..., np.newaxis], (96, 96)).numpy().squeeze()
-
-    # Plot
-    plt.figure(figsize=(4, 4))
-    plt.imshow(image_array.astype("uint8"))
-    plt.imshow(heatmap, cmap='jet', alpha=0.45)
-    plt.title(f"Grad-CAM (Pred: {label})")
-    plt.axis("off")
-    plt.savefig(save_path)
-    plt.close()
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+    return heatmap.numpy()
 
 
 # ===============================================================
-# 8. GENERATE GRAD-CAM FOR SAMPLE IMAGES (ALL CLASSES)
+# 9. GET LAST CONV LAYER NAME
+# ===============================================================
+last_conv_name = None
+for layer in reversed(model.layers):
+    if len(layer.output_shape) == 4:  # Conv layer
+        last_conv_name = layer.name
+        break
+
+if last_conv_name is None:
+    raise ValueError("❌ No 4D Conv layer found for Grad-CAM.")
+
+print(f"\n✔ Last Conv Layer found: {last_conv_name}")
+
+# ===============================================================
+# 10. GENERATE GRAD-CAM HEATMAPS FOR ALL CLASSES
 # ===============================================================
 print("\nGenerating Grad-CAM heatmaps...")
 
-unique_labels = np.unique(y_test)
-for cls in unique_labels:
-    idx = np.where(y_test == cls)[0][0]  # pick first instance of each class
-    img = (X_test[idx] * 255).numpy().astype("uint8")
-    pred = preds[idx]
+classes = np.unique(y_test)
 
-    save_path = f"{OUTPUT_DIR}/gradcam_class_{cls}.png"
-    generate_gradcam(img, pred, save_path)
+for cls in classes:
+    idx = np.where(y_test == cls)[0][0]   # first sample of each class
 
-print("Grad-CAM heatmaps saved.")
+    img = (X_test[idx] * 255).astype("uint8")   # FIXED: no .numpy()
+    heatmap = make_gradcam_heatmap(img, model, last_conv_name)
 
+    # Save heatmap
+    plt.figure(figsize=(4, 4))
+    plt.imshow(heatmap, cmap="jet")
+    plt.title(f"Grad-CAM — Class {cls}")
+    plt.axis("off")
+    plt.savefig(f"{OUTPUT_DIR}/gradcam_class_{cls}.png")
+    plt.close()
+
+print("✔ Grad-CAM heatmaps saved.")
 
 # ===============================================================
-# 9. SAVE MISCLASSIFIED SAMPLES
+# 11. SAVE SAMPLE MISCLASSIFIED IMAGES
 # ===============================================================
+misclassified = np.where(preds != y_test)[0][:10]
+
 print("\nSaving misclassified samples...")
-mis_idx = np.where(preds != y_test)[0][:10]   # first 10 mistakes
 
-for i, idx in enumerate(mis_idx):
-    img = (X_test[idx] * 255).numpy().astype("uint8")
-    true_label = y_test[idx]
-    pred_label = preds[idx]
+for i, idx in enumerate(misclassified):
+    img = (X_test[idx] * 255).astype("uint8")   # FIXED
 
     plt.figure(figsize=(3, 3))
-    plt.imshow(img.astype("uint8"))
-    plt.title(f"True: {true_label} | Pred: {pred_label}")
+    plt.imshow(img.squeeze(), cmap="gray")
+    plt.title(f"True: {y_test[idx]} | Pred: {preds[idx]}")
     plt.axis("off")
     plt.savefig(f"{OUTPUT_DIR}/misclassified_{i}.png")
     plt.close()
 
-print("Misclassified image samples saved.")
+print("✔ Misclassified samples saved.")
 
 # ===============================================================
-print("\n🎉 PERSON 4 COMPLETE — All evaluation outputs generated successfully!")
+# 12. DONE
 # ===============================================================
+print("\n🎉 PERSON 4 COMPLETE — All outputs saved successfully!")
