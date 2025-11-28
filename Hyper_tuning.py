@@ -10,8 +10,8 @@ from sklearn.metrics import classification_report, confusion_matrix
 # ===============================================================
 BASE = "/home/sat3812/Final_project"
 NPZ_PATH = f"{BASE}/Dataset/npz"
-OUTPUT = f"{BASE}/Output_3"
-MODEL_FROM_P2 = f"{BASE}/Output_2/mobilenetv2_person2.h5"
+OUTPUT = f"{BASE}/Output_P3"
+MODEL_FROM_P2 = f"{BASE}/Output_2/mobilenetv2P2.h5"
 
 os.makedirs(OUTPUT, exist_ok=True)
 print("Saving Person3 outputs to:", OUTPUT)
@@ -136,7 +136,7 @@ plt.close()
 # ===============================================================
 # SAVE FINAL MODEL
 # ===============================================================
-FINAL_MODEL = f"{OUTPUT}/mobilenetv2_person3_finetuned.h5"
+FINAL_MODEL = f"{OUTPUT}/mobilenetv2finetuned.h5"
 model.save(FINAL_MODEL)
 print("Saved Person3 fine-tuned model to:", FINAL_MODEL)
 
