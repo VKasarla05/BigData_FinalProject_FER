@@ -5,9 +5,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix
 
-# ======================================================
-# Paths
-# ======================================================
+# ===============================================================
+# PATHS
+# ===============================================================
 BASE = "/home/sat3812/Final_project"
 NPZ_PATH = f"{BASE}/Dataset/npz"
 OUTPUT_DIR = f"{BASE}/Output_4"
@@ -16,80 +16,97 @@ MODEL_PATH = f"{BASE}/Output_P3/mobilenetv2finetuned.h5"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 print("Saving Person4 outputs to:", OUTPUT_DIR)
 
-# ======================================================
-# Load NPZ files
-# ======================================================
+# ===============================================================
+# LOAD NPZ FILES
+# ===============================================================
 train = np.load(f"{NPZ_PATH}/train.npz")
 val   = np.load(f"{NPZ_PATH}/val.npz")
 test  = np.load(f"{NPZ_PATH}/test.npz")
 
 X_test, y_test = test["X"], test["y"]
-X_test = X_test[..., np.newaxis]
 
 print("Test shape:", X_test.shape)
 
-# ======================================================
-# Load Person3 model
-# ======================================================
+# ===============================================================
+# PREPROCESS TEST DATA (match 96x96x3 used in Person2 & 3)
+# ===============================================================
+IMG_SIZE = 96
+
+def preprocess(x):
+    x = np.repeat(x[..., np.newaxis], 3, axis=-1)
+    x = tf.image.resize(x, (IMG_SIZE, IMG_SIZE)).numpy()
+    return x
+
+X_test = preprocess(X_test)
+print("Final test shape:", X_test.shape)
+
+# ===============================================================
+# LOAD FINE-TUNED MODEL (Person3)
+# ===============================================================
 print("Loading Person3 fine-tuned model...")
 model = tf.keras.models.load_model(MODEL_PATH)
 print("Model loaded successfully.")
 
-# ======================================================
-# Preprocess test images to MobileNet size (96×96×3)
-# ======================================================
-IMG_SIZE = 96
-
-def prep(x):
-    x = np.repeat(x, 3, axis=-1)
-    x = tf.image.resize(x, (IMG_SIZE, IMG_SIZE)).numpy()
-    return x
-
-X_test_resized = prep(X_test)
-
-print("Final test shape:", X_test_resized.shape)
-
-# ======================================================
-# Evaluate model on test set
-# ======================================================
+# ===============================================================
+# EVALUATE MODEL
+# ===============================================================
 print("Evaluating on test set...")
-pred_probs = model.predict(X_test_resized, verbose=0)
+test_loss, test_acc = model.evaluate(X_test, y_test, verbose=2)
+print("Test accuracy:", test_acc)
+print("Test loss:", test_loss)
+
+# ===============================================================
+# PREDICTIONS
+# ===============================================================
+pred_probs = model.predict(X_test, verbose=0)
 preds = np.argmax(pred_probs, axis=1)
 
+# ===============================================================
+# SAVE CLASSIFICATION REPORT
+# ===============================================================
 report = classification_report(y_test, preds)
 with open(f"{OUTPUT_DIR}/classification_report.txt", "w") as f:
     f.write(report)
+print("Classification report saved.")
 
-print(report)
-
-# ======================================================
-# Confusion Matrix
-# ======================================================
+# ===============================================================
+# CONFUSION MATRIX
+# ===============================================================
 cm = confusion_matrix(y_test, preds)
-plt.figure(figsize=(8,6))
+plt.figure(figsize=(8, 6))
 sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
 plt.title("Confusion Matrix")
+plt.tight_layout()
 plt.savefig(f"{OUTPUT_DIR}/confusion_matrix.png")
 plt.close()
+print("Confusion matrix saved.")
 
-# ======================================================
-# Identify last convolution layer safely
-# ======================================================
+# ===============================================================
+# FIND LAST CONV LAYER (bulletproof recursive version)
+# ===============================================================
 def get_last_conv_layer(model):
+    # Recursively search inside nested models
     for layer in reversed(model.layers):
-        if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
+        if isinstance(layer, tf.keras.Model):
+            try:
+                return get_last_conv_layer(layer)
+            except:
+                pass
+        # Find any convolution layer
+        if isinstance(layer, (tf.keras.layers.Conv2D,
+                              tf.keras.layers.DepthwiseConv2D)):
             return layer.name
-    raise ValueError("No convolution layer found.")
+    raise ValueError("No convolutional layer found for Grad-CAM.")
 
 last_conv_name = get_last_conv_layer(model)
-print("Last Conv Layer:", last_conv_name)
+print("Last conv layer detected:", last_conv_name)
 
-# ======================================================
-# Grad-CAM generator
-# ======================================================
-def make_gradcam_heatmap(img_array, model, last_conv_layer_name):
+# ===============================================================
+# GRAD-CAM FUNCTION
+# ===============================================================
+def make_gradcam_heatmap(img, model, last_conv_layer_name):
     grad_model = tf.keras.models.Model(
-        inputs=model.input,
+        inputs=model.inputs,
         outputs=[
             model.get_layer(last_conv_layer_name).output,
             model.output
@@ -97,51 +114,55 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name):
     )
 
     with tf.GradientTape() as tape:
-        conv_out, preds = grad_model(np.expand_dims(img_array, axis=0))
-        class_index = tf.argmax(preds[0])
-        class_channel = preds[:, class_index]
+        conv_outputs, predictions = grad_model(np.expand_dims(img, axis=0))
+        pred_index = tf.argmax(predictions[0])
+        loss = predictions[:, pred_index]
 
-    grads = tape.gradient(class_channel, conv_out)
-    pooled_grads = tf.reduce_mean(grads, axis=(0,1,2))
+    grads = tape.gradient(loss, conv_outputs)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
-    conv_out = conv_out[0]
-    heatmap = conv_out @ pooled_grads[..., tf.newaxis]
+    conv_outputs = conv_outputs[0]
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
     heatmap = tf.squeeze(heatmap)
 
-    heatmap = tf.maximum(heatmap, 0) / tf.reduce_max(heatmap)
+    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
     return heatmap.numpy()
 
-# ======================================================
-# Generate Grad-CAM for 1 sample per class
-# ======================================================
+# ===============================================================
+# GENERATE GRAD-CAM FOR EACH CLASS
+# ===============================================================
 classes = np.unique(y_test)
+print("Generating Grad-CAM heatmaps...")
 
 for cls in classes:
-    idx = np.where(y_test == cls)[0][0]
-    img = X_test_resized[idx]
-
+    idx = np.where(y_test == cls)[0][0]  # take first sample of class
+    img = X_test[idx]
     heatmap = make_gradcam_heatmap(img, model, last_conv_name)
 
-    plt.figure(figsize=(4,4))
+    plt.figure(figsize=(4, 4))
     plt.imshow(heatmap, cmap="jet")
     plt.title(f"Grad-CAM Class {cls}")
     plt.axis("off")
     plt.savefig(f"{OUTPUT_DIR}/gradcam_class_{cls}.png")
     plt.close()
 
-# ======================================================
-# Save misclassified samples
-# ======================================================
-mis_idx = np.where(preds != y_test)[0][:10]
+print("Grad-CAM heatmaps saved.")
 
-for i, idx in enumerate(mis_idx):
-    img = X_test[idx].squeeze()
+# ===============================================================
+# SAVE MISCLASSIFIED SAMPLES
+# ===============================================================
+misclassified = np.where(preds != y_test)[0][:10]
+print("Saving misclassified samples...")
 
-    plt.figure(figsize=(3,3))
-    plt.imshow(img, cmap="gray")
-    plt.title(f"True: {y_test[idx]}  Pred: {preds[idx]}")
+for i, idx in enumerate(misclassified):
+    img = X_test[idx]
+
+    plt.figure(figsize=(3, 3))
+    plt.imshow(img.astype("uint8"))
+    plt.title(f"True: {y_test[idx]} | Pred: {preds[idx]}")
     plt.axis("off")
     plt.savefig(f"{OUTPUT_DIR}/misclassified_{i}.png")
     plt.close()
 
-print("Person4 completed. All outputs saved.")
+print("Misclassified sample images saved.")
+print("Person4 processing completed.")
