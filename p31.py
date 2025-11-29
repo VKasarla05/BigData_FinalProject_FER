@@ -16,7 +16,7 @@ spark = SparkSession.builder \
     .config("spark.executor.memory", "4g") \
     .getOrCreate()
 
-print("Spark started with workers:", spark.sparkContext.master)
+print("Spark started on:", spark.sparkContext.master)
 
 # =====================================================
 # 2. PATHS
@@ -29,27 +29,27 @@ os.makedirs(OUTPUT, exist_ok=True)
 print("Saving Person2 outputs to:", OUTPUT)
 
 # =====================================================
-# 3. LOAD NPZ FILES THROUGH SPARK
+# 3. LOAD NPZ DATA
 # =====================================================
 train_npz = np.load(f"{NPZ_PATH}/train.npz")
 val_npz   = np.load(f"{NPZ_PATH}/val.npz")
 test_npz  = np.load(f"{NPZ_PATH}/test.npz")
 
 X_train, y_train = train_npz["X"], train_npz["y"]
-X_val, y_val     = val_npz["X"],   val_npz["y"]
-X_test, y_test   = test_npz["X"],  test_npz["y"]
+X_val, y_val     = val_npz["X"],  val_npz["y"]
+X_test, y_test   = test_npz["X"], test_npz["y"]
 
 print("Loaded datasets:")
 print("Train:", X_train.shape)
 print("Val:  ", X_val.shape)
 print("Test: ", X_test.shape)
 
-# Stop Spark before TF training to avoid memory conflicts
+# Stop Spark before TensorFlow execution
 spark.stop()
 print("Spark session stopped.")
 
 # =====================================================
-# 4. PREPROCESSING
+# 4. PREPROCESS FOR RESNET (Resize + RGB + Normalize)
 # =====================================================
 IMG_SIZE = 96
 
@@ -65,45 +65,43 @@ X_test  = preprocess(X_test)
 print("Preprocessed X_train shape:", X_train.shape)
 
 # =====================================================
-# 5. BUILD RESNET18 ARCHITECTURE
+# 5. RESNET18 ARCHITECTURE
 # =====================================================
-def conv_bn_relu(x, filters, kernel, stride=1):
-    x = tf.keras.layers.Conv2D(filters, kernel, strides=stride,
-                               padding="same", use_bias=False)(x)
+def conv_bn_relu(x, f, k, s=1):
+    x = tf.keras.layers.Conv2D(f, k, strides=s, padding="same", use_bias=False)(x)
     x = tf.keras.layers.BatchNormalization()(x)
     return tf.keras.layers.ReLU()(x)
 
-def residual_block(x, filters, downsample=False):
+def residual_block(x, f, down=False):
     shortcut = x
-    stride = 2 if downsample else 1
+    s = 2 if down else 1
 
-    x = conv_bn_relu(x, filters, 3, stride)
-    x = tf.keras.layers.Conv2D(filters, 3, padding="same", use_bias=False)(x)
+    x = conv_bn_relu(x, f, 3, s)
+    x = tf.keras.layers.Conv2D(f, 3, padding="same", use_bias=False)(x)
     x = tf.keras.layers.BatchNormalization()(x)
 
-    if downsample:
-        shortcut = tf.keras.layers.Conv2D(filters, 1, strides=2,
-                                          use_bias=False)(shortcut)
+    if down:
+        shortcut = tf.keras.layers.Conv2D(f, 1, strides=2, use_bias=False)(shortcut)
         shortcut = tf.keras.layers.BatchNormalization()(shortcut)
 
     x = tf.keras.layers.Add()([x, shortcut])
     return tf.keras.layers.ReLU()(x)
 
 def build_resnet18():
-    inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+    inputs = tf.keras.Input((IMG_SIZE, IMG_SIZE, 3))
 
     x = conv_bn_relu(inputs, 64, 3)
 
     x = residual_block(x, 64)
     x = residual_block(x, 64)
 
-    x = residual_block(x, 128, downsample=True)
+    x = residual_block(x, 128, down=True)
     x = residual_block(x, 128)
 
-    x = residual_block(x, 256, downsample=True)
+    x = residual_block(x, 256, down=True)
     x = residual_block(x, 256)
 
-    x = residual_block(x, 512, downsample=True)
+    x = residual_block(x, 512, down=True)
     x = residual_block(x, 512)
 
     x = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
@@ -125,7 +123,7 @@ with open(os.path.join(OUTPUT, "resnet18_model_summary.txt"), "w") as f:
     model.summary(print_fn=lambda x: f.write(x + "\n"))
 
 # =====================================================
-# 6. TRAIN MODEL
+# 6. TRAIN THE MODEL
 # =====================================================
 history = model.fit(
     X_train, y_train,
@@ -139,19 +137,19 @@ history = model.fit(
 # 7. SAVE TRAINING PLOTS
 # =====================================================
 plt.figure()
-plt.plot(history.history["accuracy"])
-plt.plot(history.history["val_accuracy"])
-plt.legend(["train", "val"])
-plt.title("Accuracy")
-plt.savefig(os.path.join(OUTPUT, "accuracy_plot.png"))
+plt.plot(history.history["accuracy"], label="train")
+plt.plot(history.history["val_accuracy"], label="val")
+plt.legend()
+plt.title("ResNet18 Accuracy")
+plt.savefig(f"{OUTPUT}/accuracy_plot.png")
 plt.close()
 
 plt.figure()
-plt.plot(history.history["loss"])
-plt.plot(history.history["val_loss"])
-plt.legend(["train", "val"])
-plt.title("Loss")
-plt.savefig(os.path.join(OUTPUT, "loss_plot.png"))
+plt.plot(history.history["loss"], label="train")
+plt.plot(history.history["val_loss"], label="val")
+plt.legend()
+plt.title("ResNet18 Loss")
+plt.savefig(f"{OUTPUT}/loss_plot.png")
 plt.close()
 
 # =====================================================
@@ -167,12 +165,12 @@ cm = confusion_matrix(y_test, preds)
 
 plt.figure(figsize=(7,6))
 sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
-plt.title("Confusion Matrix")
+plt.title("ResNet18 Confusion Matrix")
 plt.savefig(os.path.join(OUTPUT, "confusion_matrix.png"))
 plt.close()
 
 # =====================================================
-# 9. SAVE MODEL
+# 9. SAVE FINAL MODEL
 # =====================================================
-model.save(os.path.join(OUTPUT, "resnet18_person2.h5"))
+model.save(f"{OUTPUT}/resnet18_person2.h5")
 print("Person2 ResNet18 model saved.")
