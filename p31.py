@@ -1,176 +1,479 @@
-import os
-import numpy as np
-import tensorflow as tf
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import classification_report, confusion_matrix
-from pyspark.sql import SparkSession
-
-# =====================================================
-# 1. START SPARK SESSION
-# =====================================================
-spark = SparkSession.builder \
-    .appName("Person2-ResNet18") \
-    .master("spark://192.168.13.134:7077") \
-    .config("spark.driver.memory", "4g") \
-    .config("spark.executor.memory", "4g") \
-    .getOrCreate()
-
-print("Spark started on:", spark.sparkContext.master)
-
-# =====================================================
-# 2. PATHS
-# =====================================================
-BASE = "/home/sat3812/Final_project"
-NPZ_PATH = f"{BASE}/Dataset/npz"
-OUTPUT = f"{BASE}/Output_2"
-
-os.makedirs(OUTPUT, exist_ok=True)
-print("Saving Person2 outputs to:", OUTPUT)
-
-# =====================================================
-# 3. LOAD NPZ DATA
-# =====================================================
-train_npz = np.load(f"{NPZ_PATH}/train.npz")
-val_npz   = np.load(f"{NPZ_PATH}/val.npz")
-test_npz  = np.load(f"{NPZ_PATH}/test.npz")
-
-X_train, y_train = train_npz["X"], train_npz["y"]
-X_val, y_val     = val_npz["X"],  val_npz["y"]
-X_test, y_test   = test_npz["X"], test_npz["y"]
-
-print("Loaded datasets:")
-print("Train:", X_train.shape)
-print("Val:  ", X_val.shape)
-print("Test: ", X_test.shape)
-
-# Stop Spark before TensorFlow execution
-spark.stop()
-print("Spark session stopped.")
-
-# =====================================================
-# 4. PREPROCESS FOR RESNET (Resize + RGB + Normalize)
-# =====================================================
-IMG_SIZE = 96
-
-def preprocess(x):
-    x = np.repeat(x[..., np.newaxis], 3, axis=-1)
-    x = tf.image.resize(x, (IMG_SIZE, IMG_SIZE)).numpy()
-    return x.astype("float32") / 255.0
-
-X_train = preprocess(X_train)
-X_val   = preprocess(X_val)
-X_test  = preprocess(X_test)
-
-print("Preprocessed X_train shape:", X_train.shape)
-
-# =====================================================
-# 5. RESNET18 ARCHITECTURE
-# =====================================================
-def conv_bn_relu(x, f, k, s=1):
-    x = tf.keras.layers.Conv2D(f, k, strides=s, padding="same", use_bias=False)(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    return tf.keras.layers.ReLU()(x)
-
-def residual_block(x, f, down=False):
-    shortcut = x
-    s = 2 if down else 1
-
-    x = conv_bn_relu(x, f, 3, s)
-    x = tf.keras.layers.Conv2D(f, 3, padding="same", use_bias=False)(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-
-    if down:
-        shortcut = tf.keras.layers.Conv2D(f, 1, strides=2, use_bias=False)(shortcut)
-        shortcut = tf.keras.layers.BatchNormalization()(shortcut)
-
-    x = tf.keras.layers.Add()([x, shortcut])
-    return tf.keras.layers.ReLU()(x)
-
-def build_resnet18():
-    inputs = tf.keras.Input((IMG_SIZE, IMG_SIZE, 3))
-
-    x = conv_bn_relu(inputs, 64, 3)
-
-    x = residual_block(x, 64)
-    x = residual_block(x, 64)
-
-    x = residual_block(x, 128, down=True)
-    x = residual_block(x, 128)
-
-    x = residual_block(x, 256, down=True)
-    x = residual_block(x, 256)
-
-    x = residual_block(x, 512, down=True)
-    x = residual_block(x, 512)
-
-    x = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
-    x = tf.keras.layers.Dense(128, activation="relu")(x)
-    x = tf.keras.layers.Dropout(0.4)(x)
-    outputs = tf.keras.layers.Dense(7, activation="softmax")(x)
-
-    return tf.keras.Model(inputs, outputs)
-
-model = build_resnet18()
-
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(1e-4),
-    loss="sparse_categorical_crossentropy",
-    metrics=["accuracy"]
-)
-
-with open(os.path.join(OUTPUT, "resnet18_model_summary.txt"), "w") as f:
-    model.summary(print_fn=lambda x: f.write(x + "\n"))
-
-# =====================================================
-# 6. TRAIN THE MODEL
-# =====================================================
-history = model.fit(
-    X_train, y_train,
-    validation_data=(X_val, y_val),
-    epochs=12,
-    batch_size=64,
-    verbose=2
-)
-
-# =====================================================
-# 7. SAVE TRAINING PLOTS
-# =====================================================
-plt.figure()
-plt.plot(history.history["accuracy"], label="train")
-plt.plot(history.history["val_accuracy"], label="val")
-plt.legend()
-plt.title("ResNet18 Accuracy")
-plt.savefig(f"{OUTPUT}/accuracy_plot.png")
-plt.close()
-
-plt.figure()
-plt.plot(history.history["loss"], label="train")
-plt.plot(history.history["val_loss"], label="val")
-plt.legend()
-plt.title("ResNet18 Loss")
-plt.savefig(f"{OUTPUT}/loss_plot.png")
-plt.close()
-
-# =====================================================
-# 8. TEST EVALUATION
-# =====================================================
-preds = model.predict(X_test).argmax(axis=1)
-
-report = classification_report(y_test, preds)
-with open(os.path.join(OUTPUT, "classification_report.txt"), "w") as f:
-    f.write(report)
-
-cm = confusion_matrix(y_test, preds)
-
-plt.figure(figsize=(7,6))
-sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
-plt.title("ResNet18 Confusion Matrix")
-plt.savefig(os.path.join(OUTPUT, "confusion_matrix.png"))
-plt.close()
-
-# =====================================================
-# 9. SAVE FINAL MODEL
-# =====================================================
-model.save(f"{OUTPUT}/resnet18_person2.h5")
-print("Person2 ResNet18 model saved.")
+Model: "functional"
+┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓
+┃ Layer (type)        ┃ Output Shape      ┃    Param # ┃ Connected to      ┃
+┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━┩
+│ input_layer         │ (None, 96, 96, 3) │          0 │ -                 │
+│ (InputLayer)        │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ Conv1 (Conv2D)      │ (None, 48, 48,    │        864 │ input_layer[0][0] │
+│                     │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ bn_Conv1            │ (None, 48, 48,    │        128 │ Conv1[0][0]       │
+│ (BatchNormalizatio… │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ Conv1_relu (ReLU)   │ (None, 48, 48,    │          0 │ bn_Conv1[0][0]    │
+│                     │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ expanded_conv_dept… │ (None, 48, 48,    │        288 │ Conv1_relu[0][0]  │
+│ (DepthwiseConv2D)   │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ expanded_conv_dept… │ (None, 48, 48,    │        128 │ expanded_conv_de… │
+│ (BatchNormalizatio… │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ expanded_conv_dept… │ (None, 48, 48,    │          0 │ expanded_conv_de… │
+│ (ReLU)              │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ expanded_conv_proj… │ (None, 48, 48,    │        512 │ expanded_conv_de… │
+│ (Conv2D)            │ 16)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ expanded_conv_proj… │ (None, 48, 48,    │         64 │ expanded_conv_pr… │
+│ (BatchNormalizatio… │ 16)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_1_expand      │ (None, 48, 48,    │      1,536 │ expanded_conv_pr… │
+│ (Conv2D)            │ 96)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_1_expand_BN   │ (None, 48, 48,    │        384 │ block_1_expand[0… │
+│ (BatchNormalizatio… │ 96)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_1_expand_relu │ (None, 48, 48,    │          0 │ block_1_expand_B… │
+│ (ReLU)              │ 96)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_1_pad         │ (None, 49, 49,    │          0 │ block_1_expand_r… │
+│ (ZeroPadding2D)     │ 96)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_1_depthwise   │ (None, 24, 24,    │        864 │ block_1_pad[0][0] │
+│ (DepthwiseConv2D)   │ 96)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_1_depthwise_… │ (None, 24, 24,    │        384 │ block_1_depthwis… │
+│ (BatchNormalizatio… │ 96)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_1_depthwise_… │ (None, 24, 24,    │          0 │ block_1_depthwis… │
+│ (ReLU)              │ 96)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_1_project     │ (None, 24, 24,    │      2,304 │ block_1_depthwis… │
+│ (Conv2D)            │ 24)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_1_project_BN  │ (None, 24, 24,    │         96 │ block_1_project[… │
+│ (BatchNormalizatio… │ 24)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_2_expand      │ (None, 24, 24,    │      3,456 │ block_1_project_… │
+│ (Conv2D)            │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_2_expand_BN   │ (None, 24, 24,    │        576 │ block_2_expand[0… │
+│ (BatchNormalizatio… │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_2_expand_relu │ (None, 24, 24,    │          0 │ block_2_expand_B… │
+│ (ReLU)              │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_2_depthwise   │ (None, 24, 24,    │      1,296 │ block_2_expand_r… │
+│ (DepthwiseConv2D)   │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_2_depthwise_… │ (None, 24, 24,    │        576 │ block_2_depthwis… │
+│ (BatchNormalizatio… │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_2_depthwise_… │ (None, 24, 24,    │          0 │ block_2_depthwis… │
+│ (ReLU)              │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_2_project     │ (None, 24, 24,    │      3,456 │ block_2_depthwis… │
+│ (Conv2D)            │ 24)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_2_project_BN  │ (None, 24, 24,    │         96 │ block_2_project[… │
+│ (BatchNormalizatio… │ 24)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_2_add (Add)   │ (None, 24, 24,    │          0 │ block_1_project_… │
+│                     │ 24)               │            │ block_2_project_… │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_3_expand      │ (None, 24, 24,    │      3,456 │ block_2_add[0][0] │
+│ (Conv2D)            │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_3_expand_BN   │ (None, 24, 24,    │        576 │ block_3_expand[0… │
+│ (BatchNormalizatio… │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_3_expand_relu │ (None, 24, 24,    │          0 │ block_3_expand_B… │
+│ (ReLU)              │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_3_pad         │ (None, 25, 25,    │          0 │ block_3_expand_r… │
+│ (ZeroPadding2D)     │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_3_depthwise   │ (None, 12, 12,    │      1,296 │ block_3_pad[0][0] │
+│ (DepthwiseConv2D)   │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_3_depthwise_… │ (None, 12, 12,    │        576 │ block_3_depthwis… │
+│ (BatchNormalizatio… │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_3_depthwise_… │ (None, 12, 12,    │          0 │ block_3_depthwis… │
+│ (ReLU)              │ 144)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_3_project     │ (None, 12, 12,    │      4,608 │ block_3_depthwis… │
+│ (Conv2D)            │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_3_project_BN  │ (None, 12, 12,    │        128 │ block_3_project[… │
+│ (BatchNormalizatio… │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_4_expand      │ (None, 12, 12,    │      6,144 │ block_3_project_… │
+│ (Conv2D)            │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_4_expand_BN   │ (None, 12, 12,    │        768 │ block_4_expand[0… │
+│ (BatchNormalizatio… │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_4_expand_relu │ (None, 12, 12,    │          0 │ block_4_expand_B… │
+│ (ReLU)              │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_4_depthwise   │ (None, 12, 12,    │      1,728 │ block_4_expand_r… │
+│ (DepthwiseConv2D)   │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_4_depthwise_… │ (None, 12, 12,    │        768 │ block_4_depthwis… │
+│ (BatchNormalizatio… │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_4_depthwise_… │ (None, 12, 12,    │          0 │ block_4_depthwis… │
+│ (ReLU)              │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_4_project     │ (None, 12, 12,    │      6,144 │ block_4_depthwis… │
+│ (Conv2D)            │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_4_project_BN  │ (None, 12, 12,    │        128 │ block_4_project[… │
+│ (BatchNormalizatio… │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_4_add (Add)   │ (None, 12, 12,    │          0 │ block_3_project_… │
+│                     │ 32)               │            │ block_4_project_… │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_5_expand      │ (None, 12, 12,    │      6,144 │ block_4_add[0][0] │
+│ (Conv2D)            │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_5_expand_BN   │ (None, 12, 12,    │        768 │ block_5_expand[0… │
+│ (BatchNormalizatio… │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_5_expand_relu │ (None, 12, 12,    │          0 │ block_5_expand_B… │
+│ (ReLU)              │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_5_depthwise   │ (None, 12, 12,    │      1,728 │ block_5_expand_r… │
+│ (DepthwiseConv2D)   │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_5_depthwise_… │ (None, 12, 12,    │        768 │ block_5_depthwis… │
+│ (BatchNormalizatio… │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_5_depthwise_… │ (None, 12, 12,    │          0 │ block_5_depthwis… │
+│ (ReLU)              │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_5_project     │ (None, 12, 12,    │      6,144 │ block_5_depthwis… │
+│ (Conv2D)            │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_5_project_BN  │ (None, 12, 12,    │        128 │ block_5_project[… │
+│ (BatchNormalizatio… │ 32)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_5_add (Add)   │ (None, 12, 12,    │          0 │ block_4_add[0][0… │
+│                     │ 32)               │            │ block_5_project_… │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_6_expand      │ (None, 12, 12,    │      6,144 │ block_5_add[0][0] │
+│ (Conv2D)            │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_6_expand_BN   │ (None, 12, 12,    │        768 │ block_6_expand[0… │
+│ (BatchNormalizatio… │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_6_expand_relu │ (None, 12, 12,    │          0 │ block_6_expand_B… │
+│ (ReLU)              │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_6_pad         │ (None, 13, 13,    │          0 │ block_6_expand_r… │
+│ (ZeroPadding2D)     │ 192)              │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_6_depthwise   │ (None, 6, 6, 192) │      1,728 │ block_6_pad[0][0] │
+│ (DepthwiseConv2D)   │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_6_depthwise_… │ (None, 6, 6, 192) │        768 │ block_6_depthwis… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_6_depthwise_… │ (None, 6, 6, 192) │          0 │ block_6_depthwis… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_6_project     │ (None, 6, 6, 64)  │     12,288 │ block_6_depthwis… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_6_project_BN  │ (None, 6, 6, 64)  │        256 │ block_6_project[… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_7_expand      │ (None, 6, 6, 384) │     24,576 │ block_6_project_… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_7_expand_BN   │ (None, 6, 6, 384) │      1,536 │ block_7_expand[0… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_7_expand_relu │ (None, 6, 6, 384) │          0 │ block_7_expand_B… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_7_depthwise   │ (None, 6, 6, 384) │      3,456 │ block_7_expand_r… │
+│ (DepthwiseConv2D)   │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_7_depthwise_… │ (None, 6, 6, 384) │      1,536 │ block_7_depthwis… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_7_depthwise_… │ (None, 6, 6, 384) │          0 │ block_7_depthwis… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_7_project     │ (None, 6, 6, 64)  │     24,576 │ block_7_depthwis… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_7_project_BN  │ (None, 6, 6, 64)  │        256 │ block_7_project[… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_7_add (Add)   │ (None, 6, 6, 64)  │          0 │ block_6_project_… │
+│                     │                   │            │ block_7_project_… │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_8_expand      │ (None, 6, 6, 384) │     24,576 │ block_7_add[0][0] │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_8_expand_BN   │ (None, 6, 6, 384) │      1,536 │ block_8_expand[0… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_8_expand_relu │ (None, 6, 6, 384) │          0 │ block_8_expand_B… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_8_depthwise   │ (None, 6, 6, 384) │      3,456 │ block_8_expand_r… │
+│ (DepthwiseConv2D)   │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_8_depthwise_… │ (None, 6, 6, 384) │      1,536 │ block_8_depthwis… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_8_depthwise_… │ (None, 6, 6, 384) │          0 │ block_8_depthwis… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_8_project     │ (None, 6, 6, 64)  │     24,576 │ block_8_depthwis… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_8_project_BN  │ (None, 6, 6, 64)  │        256 │ block_8_project[… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_8_add (Add)   │ (None, 6, 6, 64)  │          0 │ block_7_add[0][0… │
+│                     │                   │            │ block_8_project_… │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_9_expand      │ (None, 6, 6, 384) │     24,576 │ block_8_add[0][0] │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_9_expand_BN   │ (None, 6, 6, 384) │      1,536 │ block_9_expand[0… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_9_expand_relu │ (None, 6, 6, 384) │          0 │ block_9_expand_B… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_9_depthwise   │ (None, 6, 6, 384) │      3,456 │ block_9_expand_r… │
+│ (DepthwiseConv2D)   │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_9_depthwise_… │ (None, 6, 6, 384) │      1,536 │ block_9_depthwis… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_9_depthwise_… │ (None, 6, 6, 384) │          0 │ block_9_depthwis… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_9_project     │ (None, 6, 6, 64)  │     24,576 │ block_9_depthwis… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_9_project_BN  │ (None, 6, 6, 64)  │        256 │ block_9_project[… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_9_add (Add)   │ (None, 6, 6, 64)  │          0 │ block_8_add[0][0… │
+│                     │                   │            │ block_9_project_… │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_10_expand     │ (None, 6, 6, 384) │     24,576 │ block_9_add[0][0] │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_10_expand_BN  │ (None, 6, 6, 384) │      1,536 │ block_10_expand[… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_10_expand_re… │ (None, 6, 6, 384) │          0 │ block_10_expand_… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_10_depthwise  │ (None, 6, 6, 384) │      3,456 │ block_10_expand_… │
+│ (DepthwiseConv2D)   │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_10_depthwise… │ (None, 6, 6, 384) │      1,536 │ block_10_depthwi… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_10_depthwise… │ (None, 6, 6, 384) │          0 │ block_10_depthwi… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_10_project    │ (None, 6, 6, 96)  │     36,864 │ block_10_depthwi… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_10_project_BN │ (None, 6, 6, 96)  │        384 │ block_10_project… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_11_expand     │ (None, 6, 6, 576) │     55,296 │ block_10_project… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_11_expand_BN  │ (None, 6, 6, 576) │      2,304 │ block_11_expand[… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_11_expand_re… │ (None, 6, 6, 576) │          0 │ block_11_expand_… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_11_depthwise  │ (None, 6, 6, 576) │      5,184 │ block_11_expand_… │
+│ (DepthwiseConv2D)   │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_11_depthwise… │ (None, 6, 6, 576) │      2,304 │ block_11_depthwi… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_11_depthwise… │ (None, 6, 6, 576) │          0 │ block_11_depthwi… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_11_project    │ (None, 6, 6, 96)  │     55,296 │ block_11_depthwi… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_11_project_BN │ (None, 6, 6, 96)  │        384 │ block_11_project… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_11_add (Add)  │ (None, 6, 6, 96)  │          0 │ block_10_project… │
+│                     │                   │            │ block_11_project… │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_12_expand     │ (None, 6, 6, 576) │     55,296 │ block_11_add[0][… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_12_expand_BN  │ (None, 6, 6, 576) │      2,304 │ block_12_expand[… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_12_expand_re… │ (None, 6, 6, 576) │          0 │ block_12_expand_… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_12_depthwise  │ (None, 6, 6, 576) │      5,184 │ block_12_expand_… │
+│ (DepthwiseConv2D)   │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_12_depthwise… │ (None, 6, 6, 576) │      2,304 │ block_12_depthwi… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_12_depthwise… │ (None, 6, 6, 576) │          0 │ block_12_depthwi… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_12_project    │ (None, 6, 6, 96)  │     55,296 │ block_12_depthwi… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_12_project_BN │ (None, 6, 6, 96)  │        384 │ block_12_project… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_12_add (Add)  │ (None, 6, 6, 96)  │          0 │ block_11_add[0][… │
+│                     │                   │            │ block_12_project… │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_13_expand     │ (None, 6, 6, 576) │     55,296 │ block_12_add[0][… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_13_expand_BN  │ (None, 6, 6, 576) │      2,304 │ block_13_expand[… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_13_expand_re… │ (None, 6, 6, 576) │          0 │ block_13_expand_… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_13_pad        │ (None, 7, 7, 576) │          0 │ block_13_expand_… │
+│ (ZeroPadding2D)     │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_13_depthwise  │ (None, 3, 3, 576) │      5,184 │ block_13_pad[0][… │
+│ (DepthwiseConv2D)   │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_13_depthwise… │ (None, 3, 3, 576) │      2,304 │ block_13_depthwi… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_13_depthwise… │ (None, 3, 3, 576) │          0 │ block_13_depthwi… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_13_project    │ (None, 3, 3, 160) │     92,160 │ block_13_depthwi… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_13_project_BN │ (None, 3, 3, 160) │        640 │ block_13_project… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_14_expand     │ (None, 3, 3, 960) │    153,600 │ block_13_project… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_14_expand_BN  │ (None, 3, 3, 960) │      3,840 │ block_14_expand[… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_14_expand_re… │ (None, 3, 3, 960) │          0 │ block_14_expand_… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_14_depthwise  │ (None, 3, 3, 960) │      8,640 │ block_14_expand_… │
+│ (DepthwiseConv2D)   │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_14_depthwise… │ (None, 3, 3, 960) │      3,840 │ block_14_depthwi… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_14_depthwise… │ (None, 3, 3, 960) │          0 │ block_14_depthwi… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_14_project    │ (None, 3, 3, 160) │    153,600 │ block_14_depthwi… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_14_project_BN │ (None, 3, 3, 160) │        640 │ block_14_project… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_14_add (Add)  │ (None, 3, 3, 160) │          0 │ block_13_project… │
+│                     │                   │            │ block_14_project… │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_15_expand     │ (None, 3, 3, 960) │    153,600 │ block_14_add[0][… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_15_expand_BN  │ (None, 3, 3, 960) │      3,840 │ block_15_expand[… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_15_expand_re… │ (None, 3, 3, 960) │          0 │ block_15_expand_… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_15_depthwise  │ (None, 3, 3, 960) │      8,640 │ block_15_expand_… │
+│ (DepthwiseConv2D)   │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_15_depthwise… │ (None, 3, 3, 960) │      3,840 │ block_15_depthwi… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_15_depthwise… │ (None, 3, 3, 960) │          0 │ block_15_depthwi… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_15_project    │ (None, 3, 3, 160) │    153,600 │ block_15_depthwi… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_15_project_BN │ (None, 3, 3, 160) │        640 │ block_15_project… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_15_add (Add)  │ (None, 3, 3, 160) │          0 │ block_14_add[0][… │
+│                     │                   │            │ block_15_project… │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_16_expand     │ (None, 3, 3, 960) │    153,600 │ block_15_add[0][… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_16_expand_BN  │ (None, 3, 3, 960) │      3,840 │ block_16_expand[… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_16_expand_re… │ (None, 3, 3, 960) │          0 │ block_16_expand_… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_16_depthwise  │ (None, 3, 3, 960) │      8,640 │ block_16_expand_… │
+│ (DepthwiseConv2D)   │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_16_depthwise… │ (None, 3, 3, 960) │      3,840 │ block_16_depthwi… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_16_depthwise… │ (None, 3, 3, 960) │          0 │ block_16_depthwi… │
+│ (ReLU)              │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_16_project    │ (None, 3, 3, 320) │    307,200 │ block_16_depthwi… │
+│ (Conv2D)            │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ block_16_project_BN │ (None, 3, 3, 320) │      1,280 │ block_16_project… │
+│ (BatchNormalizatio… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ Conv_1 (Conv2D)     │ (None, 3, 3,      │    409,600 │ block_16_project… │
+│                     │ 1280)             │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ Conv_1_bn           │ (None, 3, 3,      │      5,120 │ Conv_1[0][0]      │
+│ (BatchNormalizatio… │ 1280)             │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ out_relu (ReLU)     │ (None, 3, 3,      │          0 │ Conv_1_bn[0][0]   │
+│                     │ 1280)             │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ global_average_poo… │ (None, 1280)      │          0 │ out_relu[0][0]    │
+│ (GlobalAveragePool… │                   │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ dense (Dense)       │ (None, 128)       │    163,968 │ global_average_p… │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ dropout (Dropout)   │ (None, 128)       │          0 │ dense[0][0]       │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ dense_1 (Dense)     │ (None, 7)         │        903 │ dropout[0][0]     │
+└─────────────────────┴───────────────────┴────────────┴───────────────────┘
+ Total params: 2,422,857 (9.24 MB)
+ Trainable params: 164,871 (644.03 KB)
+ Non-trainable params: 2,257,984 (8.61 MB)
+ Optimizer params: 2 (12.00 B)
