@@ -1,3 +1,7 @@
+# ===============================================================
+# PERSON 4 – Final Evaluation + Interpretability Suite
+# ===============================================================
+
 import os
 import numpy as np
 import tensorflow as tf
@@ -5,164 +9,202 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix
 
-# ===============================================================
+# ---------------------------------------------------------------
 # PATHS
-# ===============================================================
+# ---------------------------------------------------------------
 BASE = "/home/sat3812/Final_project"
 NPZ_PATH = f"{BASE}/Dataset/npz"
-OUTPUT_DIR = f"{BASE}/Output_4"
+OUTPUT = f"{BASE}/Output4"
 MODEL_PATH = f"{BASE}/Output_P3/mobilenetv2finetuned.h5"
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-print("Saving Person4 outputs to:", OUTPUT_DIR)
+os.makedirs(OUTPUT, exist_ok=True)
+print("Saving Person4 outputs to:", OUTPUT)
 
-# ===============================================================
+IMG_SIZE = 96
+NUM_CLASSES = 7
+
+EMOTION_MAP = {
+    0: "angry",
+    1: "disgust",
+    2: "fear",
+    3: "happy",
+    4: "neutral",
+    5: "sad",
+    6: "surprise"
+}
+
+# ---------------------------------------------------------------
 # LOAD NPZ FILES
-# ===============================================================
+# ---------------------------------------------------------------
 train = np.load(f"{NPZ_PATH}/train.npz")
 val   = np.load(f"{NPZ_PATH}/val.npz")
 test  = np.load(f"{NPZ_PATH}/test.npz")
 
 X_test, y_test = test["X"], test["y"]
 
-print("Test shape:", X_test.shape)
-
-# ===============================================================
-# PREPROCESS TEST DATA (match 96x96x3 used in Person2 & 3)
-# ===============================================================
-IMG_SIZE = 96
-
+# ---------------------------------------------------------------
+# PREPROCESSING
+# ---------------------------------------------------------------
 def preprocess(x):
     x = np.repeat(x[..., np.newaxis], 3, axis=-1)
-    x = tf.image.resize(x, (IMG_SIZE, IMG_SIZE)).numpy()
+    x = tf.image.resize(x, (IMG_SIZE, IMG_SIZE)).numpy().astype("float32")
     return x
 
 X_test = preprocess(X_test)
+
 print("Final test shape:", X_test.shape)
 
-# ===============================================================
-# LOAD FINE-TUNED MODEL (Person3)
-# ===============================================================
+# ---------------------------------------------------------------
+# LOAD MODEL
+# ---------------------------------------------------------------
 print("Loading Person3 fine-tuned model...")
 model = tf.keras.models.load_model(MODEL_PATH)
 print("Model loaded successfully.")
 
-# ===============================================================
-# EVALUATE MODEL
-# ===============================================================
+# Save model summary
+with open(os.path.join(OUTPUT, "person4_model_summary.txt"), "w") as f:
+    model.summary(print_fn=lambda x: f.write(x + "\n"))
+
+# ---------------------------------------------------------------
+# EVALUATION
+# ---------------------------------------------------------------
 print("Evaluating on test set...")
 test_loss, test_acc = model.evaluate(X_test, y_test, verbose=2)
-print("Test accuracy:", test_acc)
-print("Test loss:", test_loss)
 
-# ===============================================================
-# PREDICTIONS
-# ===============================================================
-pred_probs = model.predict(X_test, verbose=0)
-preds = np.argmax(pred_probs, axis=1)
+with open(os.path.join(OUTPUT, "person4_test_metrics.txt"), "w") as f:
+    f.write(f"Test accuracy: {test_acc}\n")
+    f.write(f"Test loss: {test_loss}\n")
 
-# ===============================================================
-# SAVE CLASSIFICATION REPORT
-# ===============================================================
-report = classification_report(y_test, preds)
-with open(f"{OUTPUT_DIR}/classification_report.txt", "w") as f:
+y_pred = np.argmax(model.predict(X_test), axis=1)
+report = classification_report(y_test, y_pred)
+
+with open(os.path.join(OUTPUT, "person4_classification_report.txt"), "w") as f:
     f.write(report)
-print("Classification report saved.")
 
-# ===============================================================
-# CONFUSION MATRIX
-# ===============================================================
-cm = confusion_matrix(y_test, preds)
-plt.figure(figsize=(8, 6))
-sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
-plt.title("Confusion Matrix")
-plt.tight_layout()
-plt.savefig(f"{OUTPUT_DIR}/confusion_matrix.png")
+print(report)
+
+# Confusion matrix
+cm = confusion_matrix(y_test, y_pred)
+plt.figure(figsize=(7, 6))
+sns.heatmap(cm, annot=True, cmap="Blues")
+plt.title("Confusion Matrix – Person4")
+plt.savefig(os.path.join(OUTPUT, "confusion_matrix.png"))
 plt.close()
-print("Confusion matrix saved.")
 
-# ===============================================================
-# FIND LAST CONV LAYER (bulletproof recursive version)
-# ===============================================================
-def get_last_conv_layer(model):
-    # Recursively search inside nested models
-    for layer in reversed(model.layers):
-        if isinstance(layer, tf.keras.Model):
-            try:
-                return get_last_conv_layer(layer)
-            except:
-                pass
-        # Find any convolution layer
-        if isinstance(layer, (tf.keras.layers.Conv2D,
-                              tf.keras.layers.DepthwiseConv2D)):
-            return layer.name
-    raise ValueError("No convolutional layer found for Grad-CAM.")
+# ---------------------------------------------------------------
+# SELECT CORRECT LAST CONV LAYER
+# ---------------------------------------------------------------
+LAST_CONV_LAYER_NAME = "Conv_1"      # FIXED HERE
 
-last_conv_name = get_last_conv_layer(model)
-print("Last conv layer detected:", last_conv_name)
+last_conv_layer = model.get_layer(LAST_CONV_LAYER_NAME)
 
-# ===============================================================
-# GRAD-CAM FUNCTION
-# ===============================================================
-def make_gradcam_heatmap(img, model, last_conv_layer_name):
-    grad_model = tf.keras.models.Model(
-        inputs=model.inputs,
-        outputs=[
-            model.get_layer(last_conv_layer_name).output,
-            model.output
-        ]
-    )
+grad_model = tf.keras.models.Model(
+    inputs=model.inputs,
+    outputs=[last_conv_layer.output, model.output]
+)
 
-    with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model(np.expand_dims(img, axis=0))
-        pred_index = tf.argmax(predictions[0])
-        loss = predictions[:, pred_index]
+# ---------------------------------------------------------------
+# UTILS
+# ---------------------------------------------------------------
+def normalize(cam):
+    cam = np.maximum(cam, 0)
+    cam = cam / (cam.max() + 1e-8)
+    cam = tf.image.resize(cam[..., np.newaxis], (IMG_SIZE, IMG_SIZE)).numpy()
+    return cam.reshape((IMG_SIZE, IMG_SIZE))
 
-    grads = tape.gradient(loss, conv_outputs)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+def overlay(cam, img):
+    img_norm = img.astype("float32") / 255.0
+    cam_color = plt.cm.jet(cam)[:, :, :3]
+    return 0.5 * cam_color + 0.5 * img_norm
 
-    conv_outputs = conv_outputs[0]
-    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-
-    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
-    return heatmap.numpy()
-
-# ===============================================================
-# GENERATE GRAD-CAM FOR EACH CLASS
-# ===============================================================
-classes = np.unique(y_test)
-print("Generating Grad-CAM heatmaps...")
-
-for cls in classes:
-    idx = np.where(y_test == cls)[0][0]  # take first sample of class
-    img = X_test[idx]
-    heatmap = make_gradcam_heatmap(img, model, last_conv_name)
+def save(cam, img, title, name):
+    cam_norm = normalize(cam)
+    heat = overlay(cam_norm, img)
 
     plt.figure(figsize=(4, 4))
-    plt.imshow(heatmap, cmap="jet")
-    plt.title(f"Grad-CAM Class {cls}")
+    plt.imshow(cam_norm, cmap="jet")
     plt.axis("off")
-    plt.savefig(f"{OUTPUT_DIR}/gradcam_class_{cls}.png")
+    plt.title(title)
+    plt.savefig(os.path.join(OUTPUT, f"{name}_heatmap.png"))
     plt.close()
 
-print("Grad-CAM heatmaps saved.")
+    plt.figure(figsize=(4, 4))
+    plt.imshow(heat)
+    plt.axis("off")
+    plt.title(title)
+    plt.savefig(os.path.join(OUTPUT, f"{name}_overlay.png"))
+    plt.close()
 
-# ===============================================================
-# SAVE MISCLASSIFIED SAMPLES
-# ===============================================================
-misclassified = np.where(preds != y_test)[0][:10]
-print("Saving misclassified samples...")
+# ---------------------------------------------------------------
+# GRAD-CAM
+# ---------------------------------------------------------------
+def grad_cam(img, class_idx):
+    img_tensor = tf.expand_dims(img, 0)
 
-for i, idx in enumerate(misclassified):
+    with tf.GradientTape() as tape:
+        conv, preds = grad_model(img_tensor)
+        loss = preds[:, class_idx]
+
+    grads = tape.gradient(loss, conv)[0]
+    conv = conv[0]
+
+    weights = tf.reduce_mean(grads, axis=(0, 1))
+    cam = tf.zeros(conv.shape[:2])
+
+    for i, w in enumerate(weights):
+        cam += w * conv[:, :, i]
+
+    return cam.numpy()
+
+# ---------------------------------------------------------------
+# GRAD-CAM++ (FIXED)
+# ---------------------------------------------------------------
+def grad_cam_plus(img, class_idx):
+    img_tensor = tf.expand_dims(img, 0)
+
+    with tf.GradientTape(persistent=True) as tape:
+        conv, preds = grad_model(img_tensor)
+        loss = preds[:, class_idx]
+
+    grads = tape.gradient(loss, conv)
+    conv = conv[0]
+    grads = grads[0]
+
+    first = grads
+    second = grads ** 2
+    third = grads ** 3
+
+    global_sum = tf.reduce_sum(conv * third, axis=(0, 1))
+
+    alpha_num = second
+    alpha_den = 2.0 * second + global_sum
+
+    alpha = alpha_num / (alpha_den + 1e-10)
+    weights = tf.reduce_sum(alpha * tf.nn.relu(first), axis=(0, 1))
+
+    cam = tf.reduce_sum(weights * conv, axis=-1)
+    return cam.numpy()
+
+# ---------------------------------------------------------------
+# RUN ON ONE SAMPLE PER CLASS
+# ---------------------------------------------------------------
+indices = []
+for c in range(NUM_CLASSES):
+    idxs = np.where(y_test == c)[0]
+    if len(idxs):
+        indices.append(idxs[0])
+
+print("Selected indices:", indices)
+
+for idx in indices:
     img = X_test[idx]
+    label = y_test[idx]
+    name = f"class_{label}_{idx}"
 
-    plt.figure(figsize=(3, 3))
-    plt.imshow(img.astype("uint8"))
-    plt.title(f"True: {y_test[idx]} | Pred: {preds[idx]}")
-    plt.axis("off")
-    plt.savefig(f"{OUTPUT_DIR}/misclassified_{i}.png")
-    plt.close()
+    cam = grad_cam(img, label)
+    save(cam, img, f"Grad-CAM {EMOTION_MAP[label]}", f"gradcam_{name}")
 
-print("Misclassified sample images saved.")
-print("Person4 processing completed.")
+    campp = grad_cam_plus(img, label)
+    save(campp, img, f"Grad-CAM++ {EMOTION_MAP[label]}", f"gradcampp_{name}")
+
+print("Person4 done.")
