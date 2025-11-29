@@ -15,7 +15,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 BASE = "/home/sat3812/Final_project"
 NPZ_PATH = f"{BASE}/Dataset/npz"
 OUTPUT = f"{BASE}/Output4"
-MODEL_PATH = f"{BASE}/Output_p1/baseline_model.h5"
+MODEL_PATH = f"{BASE}/Output_P3/mobilenetv2finetuned.h5"
 
 os.makedirs(OUTPUT, exist_ok=True)
 print("Saving Person4 outputs to:", OUTPUT)
