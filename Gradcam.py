@@ -1,7 +1,6 @@
 # ===============================================================
-# PERSON 4 – Final Evaluation + Interpretability Suite
+# Final Evaluation + Interpretability 
 # ===============================================================
-
 import os
 import numpy as np
 import tensorflow as tf
@@ -16,13 +15,11 @@ BASE = "/home/sat3812/Final_project"
 NPZ_PATH = f"{BASE}/Dataset/npz"
 OUTPUT = f"{BASE}/Output4"
 MODEL_PATH = f"{BASE}/Output_P3/mobilenetv2finetuned.h5"
-
 os.makedirs(OUTPUT, exist_ok=True)
 print("Saving Person4 outputs to:", OUTPUT)
 
 IMG_SIZE = 96
 NUM_CLASSES = 7
-
 EMOTION_MAP = {
     0: "angry",
     1: "disgust",
@@ -32,16 +29,13 @@ EMOTION_MAP = {
     5: "sad",
     6: "surprise"
 }
-
 # ---------------------------------------------------------------
 # LOAD NPZ FILES
 # ---------------------------------------------------------------
 train = np.load(f"{NPZ_PATH}/train.npz")
 val   = np.load(f"{NPZ_PATH}/val.npz")
 test  = np.load(f"{NPZ_PATH}/test.npz")
-
 X_test, y_test = test["X"], test["y"]
-
 # ---------------------------------------------------------------
 # PREPROCESSING
 # ---------------------------------------------------------------
@@ -49,22 +43,17 @@ def preprocess(x):
     x = np.repeat(x[..., np.newaxis], 3, axis=-1)
     x = tf.image.resize(x, (IMG_SIZE, IMG_SIZE)).numpy().astype("float32")
     return x
-
 X_test = preprocess(X_test)
-
 print("Final test shape:", X_test.shape)
-
 # ---------------------------------------------------------------
 # LOAD MODEL
 # ---------------------------------------------------------------
 print("Loading Person3 fine-tuned model...")
 model = tf.keras.models.load_model(MODEL_PATH)
 print("Model loaded successfully.")
-
 # Save model summary
 with open(os.path.join(OUTPUT, "person4_model_summary.txt"), "w") as f:
     model.summary(print_fn=lambda x: f.write(x + "\n"))
-
 # ---------------------------------------------------------------
 # EVALUATION
 # ---------------------------------------------------------------
@@ -94,8 +83,7 @@ plt.close()
 # ---------------------------------------------------------------
 # SELECT CORRECT LAST CONV LAYER
 # ---------------------------------------------------------------
-LAST_CONV_LAYER_NAME = "Conv_1"      # FIXED HERE
-
+LAST_CONV_LAYER_NAME = "Conv_1"   
 last_conv_layer = model.get_layer(LAST_CONV_LAYER_NAME)
 
 grad_model = tf.keras.models.Model(
@@ -157,7 +145,7 @@ def grad_cam(img, class_idx):
     return cam.numpy()
 
 # ---------------------------------------------------------------
-# GRAD-CAM++ (FIXED)
+# GRAD-CAM++ 
 # ---------------------------------------------------------------
 def grad_cam_plus(img, class_idx):
     img_tensor = tf.expand_dims(img, 0)
@@ -186,7 +174,7 @@ def grad_cam_plus(img, class_idx):
     return cam.numpy()
 
 # ---------------------------------------------------------------
-# RUN ON ONE SAMPLE PER CLASS
+# RUNNING ON ONE SAMPLE PER CLASS
 # ---------------------------------------------------------------
 indices = []
 for c in range(NUM_CLASSES):
