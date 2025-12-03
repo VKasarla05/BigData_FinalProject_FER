@@ -1,3 +1,6 @@
+# ==============================================================
+## Transfer Learning Model
+# ==============================================================
 import os
 import numpy as np
 import tensorflow as tf
@@ -8,18 +11,16 @@ from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 from pyspark.sql import SparkSession
 
-
 def main():
     # ==============================================================
-    # 1. START SPARK SESSION (required by project)
+    # 1. START SPARK SESSION
     # ==============================================================
     spark = SparkSession.builder \
-        .appName("Person2-TransferLearning") \
+        .appName("TransferLearning") \
         .master("spark://192.168.13.134:7077") \
         .config("spark.driver.memory", "4g") \
         .config("spark.executor.memory", "4g") \
         .getOrCreate()
-
     print("Spark session started")
     print("Spark master:", spark.sparkContext.master)
     print("Spark workers:", spark.sparkContext._jsc.sc().statusTracker().getExecutorInfos().length)
@@ -51,12 +52,10 @@ def main():
     # 4. PREPROCESSING
     # ==============================================================
     IMG_SIZE = 96
-
     def prep_images(X):
         X = np.repeat(X[..., np.newaxis], 3, axis=-1)
         X = tf.image.resize(X, (IMG_SIZE, IMG_SIZE)).numpy()
         return X
-
     print("Preprocessing...")
     X_train = prep_images(X_train)
     X_val   = prep_images(X_val)
@@ -67,7 +66,6 @@ def main():
     # 5. BUILD TRANSFER LEARNING MODEL
     # ==============================================================
     print("Building MobileNetV2 model...")
-
     base_model = tf.keras.applications.MobileNetV2(
         input_shape=(IMG_SIZE, IMG_SIZE, 3),
         include_top=False,
@@ -82,12 +80,7 @@ def main():
 
     model = tf.keras.Model(inputs=base_model.input, outputs=output)
 
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(1e-4),
-        loss="sparse_categorical_crossentropy",
-        metrics=["accuracy"]
-    )
-
+    model.compile(optimizer=tf.keras.optimizers.Adam(1e-4),loss="sparse_categorical_crossentropy",metrics=["accuracy"])
     # Save model summary
     with open(os.path.join(output_dir, "mobilenet_model_summary.txt"), "w") as f:
         model.summary(print_fn=lambda x: f.write(x + "\n"))
@@ -96,7 +89,6 @@ def main():
     # 6. TRAIN MODEL
     # ==============================================================
     print("Training MobileNetV2...")
-
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
@@ -104,7 +96,6 @@ def main():
         batch_size=64,
         verbose=2
     )
-
     # ==============================================================
     # 7. SAVE TRAINING PLOTS
     # ==============================================================
@@ -115,7 +106,7 @@ def main():
     plt.legend()
     plt.savefig(os.path.join(output_dir, "accuracy_plot.png"))
     plt.close()
-
+    
     plt.figure(figsize=(7, 5))
     plt.plot(history.history["loss"], label="Train")
     plt.plot(history.history["val_loss"], label="Val")
@@ -128,12 +119,9 @@ def main():
     # 8. TEST EVALUATION
     # ==============================================================
     print("Evaluating on test set...")
-
     y_pred = model.predict(X_test, verbose=2).argmax(axis=1)
-
     report = classification_report(y_test, y_pred)
     cm = confusion_matrix(y_test, y_pred)
-
     with open(os.path.join(output_dir, "classification_report.txt"), "w") as f:
         f.write(report)
 
