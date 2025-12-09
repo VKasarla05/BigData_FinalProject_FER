@@ -28,3 +28,8 @@ Baseline CNN: 55%
 MobileNetV2: 48%
 
 Fine-Tuned MobileNetV2: 47%
+
+# Team
+
+Team EmotionVision
+Vyshnavi Kasarla • Vaishnavi Perka • Laharika Mamidi • Hariharan Jothimani
